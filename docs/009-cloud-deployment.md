@@ -65,7 +65,7 @@ As root, once: `apt-get install -y git curl xz-utils python3 tmux gh docker.io d
 
 ### 2. install
 
-This step runs `npm install --prefix ~/ai-dev @deepseek-ai/dsh@$DSH_VERSION`. It clones this repository to `~/ai-dev/HX-superagent` and runs `pnpm install --frozen-lockfile && pnpm build`. It also clones HX-Email to `~/ai-dev/HX-Email`; the gateway image is built from that checkout.
+This step runs `npm install --prefix ~/ai-dev @deepseek-ai/dsh@$DSH_VERSION`. It clones this repository to `~/ai-dev/HX-superagent` and runs `pnpm install --frozen-lockfile && pnpm build`. It also clones HX-Email to `~/ai-dev/HX-Email`; the gateway image is built from that checkout. A fresh clone checks out `REPO_REF` / `HX_EMAIL_REF` (default `main`). An existing checkout keeps its branch and is only fast-forwarded, so an HX-Email updated by hand (for example to a branch with `github_user`) is built as it is.
 
 ### 3. profile
 

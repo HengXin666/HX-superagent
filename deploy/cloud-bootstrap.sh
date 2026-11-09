@@ -29,6 +29,7 @@ SUPERAGENT_GITHUB_REPOSITORY="${SUPERAGENT_GITHUB_REPOSITORY:-}"   # owner/name 
 GATEWAY_GH_CLI="${GATEWAY_GH_CLI:-/usr/local/bin/gh-agent}"         # gh wrapper inside the gateway image (deploy/gateway.Dockerfile)
 ISSUE_WAIT_SECONDS="${ISSUE_WAIT_SECONDS:-600}"
 
+USER="${USER:-$(id -un)}"
 export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 CHECKOUT="$AI_DEV/HX-superagent"
 HX_EMAIL_DIR="$AI_DEV/HX-Email"
@@ -52,10 +53,12 @@ step_prereqs() {
   fi
   mkdir -p "$AI_DEV" "$HOME/.local/bin"
   if [ ! -x "$AI_DEV/node/bin/node" ]; then
-    local arch; arch="$(uname -m)"; case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
+    local arch; arch="$(uname -m)"; case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) ;; esac
     local tar="node-v$NODE_VERSION-linux-$arch.tar.xz"
     curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/$tar" -o "/tmp/$tar"
-    mkdir -p "$AI_DEV/node" && tar -xJf "/tmp/$tar" -C "$AI_DEV/node" --strip-components=1 && rm -f "/tmp/$tar"
+    mkdir -p "$AI_DEV/node"
+    tar -xJf "/tmp/$tar" -C "$AI_DEV/node" --strip-components=1
+    rm -f "/tmp/$tar"
   fi
   node -v
   # dsh plugin shells out to pnpm, so pnpm must be on PATH for this user, not only inside the checkout.
@@ -71,12 +74,23 @@ step_install() {
     npm install --prefix "$AI_DEV" "@deepseek-ai/dsh@$DSH_VERSION"
   fi
   dsh --version
-  [ -d "$CHECKOUT/.git" ] || git clone "$REPO_URL" "$CHECKOUT"
-  git -C "$CHECKOUT" fetch -q origin && git -C "$CHECKOUT" checkout -q "$REPO_REF" && git -C "$CHECKOUT" pull -q --ff-only || true
+  # A fresh clone checks out REPO_REF / HX_EMAIL_REF. An existing checkout keeps its branch (it may carry
+  # work such as an updated HX-Email): it is only fast-forwarded, and a failed pull is reported, not hidden.
+  if [ ! -d "$CHECKOUT/.git" ]; then
+    git clone -q "$REPO_URL" "$CHECKOUT"
+    git -C "$CHECKOUT" checkout -q "$REPO_REF"
+  elif ! git -C "$CHECKOUT" pull -q --ff-only; then
+    echo "warning: could not fast-forward $CHECKOUT; building what is checked out" >&2
+  fi
   (cd "$CHECKOUT" && pnpm install --frozen-lockfile && pnpm build)
-  [ -d "$HX_EMAIL_DIR/.git" ] || git clone "$HX_EMAIL_URL" "$HX_EMAIL_DIR"
-  git -C "$HX_EMAIL_DIR" checkout -q "$HX_EMAIL_REF"
-  echo "superagent $(git -C "$CHECKOUT" rev-parse --short HEAD), HX-Email $(git -C "$HX_EMAIL_DIR" rev-parse --short HEAD)"
+  if [ ! -d "$HX_EMAIL_DIR/.git" ]; then
+    git clone -q "$HX_EMAIL_URL" "$HX_EMAIL_DIR"
+    git -C "$HX_EMAIL_DIR" checkout -q "$HX_EMAIL_REF"
+  fi
+  local sa_head hx_head
+  sa_head="$(git -C "$CHECKOUT" rev-parse --abbrev-ref HEAD)@$(git -C "$CHECKOUT" rev-parse --short HEAD)"
+  hx_head="$(git -C "$HX_EMAIL_DIR" rev-parse --abbrev-ref HEAD)@$(git -C "$HX_EMAIL_DIR" rev-parse --short HEAD)"
+  echo "superagent $sa_head, HX-Email $hx_head"
 }
 
 step_profile() {
@@ -119,7 +133,8 @@ PY
 
 step_gh_agent() {
   say "gh-agent: wrapper for the agent's own gh config"
-  mkdir -p "$GH_AGENT_DIR" && chmod 700 "$GH_AGENT_DIR"
+  mkdir -p "$GH_AGENT_DIR"
+  chmod 700 "$GH_AGENT_DIR"
   cat > "$HOME/.local/bin/gh-agent" <<EOF
 #!/bin/sh
 GH_CONFIG_DIR="$GH_AGENT_DIR" exec gh "\$@"
@@ -161,13 +176,22 @@ EOF
   # superagent runs on the host under systemd, so only the gateway services come up here.
   # --build rebuilds the gateway image from the current HX-Email checkout (picks up github_user once it is there).
   (cd "$CHECKOUT" && docker compose up -d --build gateway gateway-web gateway-init)
-  (cd "$CHECKOUT" && docker compose wait gateway-init >/dev/null 2>&1 || true)
+  if ! (cd "$CHECKOUT" && docker compose wait gateway-init >/dev/null); then
+    echo "gateway-init failed:" >&2; (cd "$CHECKOUT" && docker compose logs --no-color --tail 20 gateway-init) >&2 || true
+    exit 1
+  fi
   local vol; vol="$(cd "$CHECKOUT" && docker compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')_shared"
-  docker run --rm --entrypoint cat -v "$vol:/shared:ro" dsh-superagent/hx-email-gateway:local /shared/hx_router_token > "$STATE_DIR/hx_router_token.new"
-  [ -s "$STATE_DIR/hx_router_token.new" ] && mv "$STATE_DIR/hx_router_token.new" "$STATE_DIR/hx_router_token"
+  mkdir -p "$STATE_DIR"
+  local tmp="$STATE_DIR/hx_router_token.new"
+  if ! docker run --rm --entrypoint cat -v "$vol:/shared:ro" dsh-superagent/hx-email-gateway:local /shared/hx_router_token > "$tmp" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"; echo "no router key in volume $vol" >&2; exit 1
+  fi
+  mv "$tmp" "$STATE_DIR/hx_router_token"
   chmod 600 "$STATE_DIR/hx_router_token"
-  curl -fsS "http://127.0.0.1:$HX_EMAIL_BACKEND_PORT/healthz" >/dev/null && echo "gateway healthy on 127.0.0.1:$HX_EMAIL_BACKEND_PORT"
-  curl -fsS -o /dev/null "http://127.0.0.1:$HX_EMAIL_HTTP_PORT/" && echo "gateway UI on 127.0.0.1:$HX_EMAIL_HTTP_PORT"
+  curl -fsS "http://127.0.0.1:$HX_EMAIL_BACKEND_PORT/healthz" >/dev/null || { echo "gateway not healthy on 127.0.0.1:$HX_EMAIL_BACKEND_PORT" >&2; exit 1; }
+  echo "gateway healthy on 127.0.0.1:$HX_EMAIL_BACKEND_PORT"
+  curl -fsS -o /dev/null "http://127.0.0.1:$HX_EMAIL_HTTP_PORT/" || { echo "gateway UI not answering on 127.0.0.1:$HX_EMAIL_HTTP_PORT" >&2; exit 1; }
+  echo "gateway UI on 127.0.0.1:$HX_EMAIL_HTTP_PORT"
 }
 
 step_service() {
@@ -248,7 +272,8 @@ step_collaborator() {
     # Owner side, with the owner's own gh. permission=push is GitHub's "Write" role, nothing more.
     gh api -X PUT "repos/$repo/collaborators/$agent" -f permission=push --silent
     for _ in 1 2 3 4 5; do
-      inv="$(gh-agent api user/repository_invitations --jq ".[] | select(.repository.full_name==\"$repo\") | .id" | head -1)"
+      inv="$(gh-agent api user/repository_invitations --jq ".[] | select(.repository.full_name==\"$repo\") | .id" 2>/dev/null || true)"
+      inv="${inv%%$'\n'*}"
       [ -n "$inv" ] && break; sleep 3
     done
     [ -n "$inv" ] || { echo "the agent sees no invitation for $repo" >&2; exit 1; }
@@ -284,9 +309,12 @@ step_issue() {
   agent="$(agent_login)"
   url="$(gh issue create -R "$repo" -t "deployment check $(date '+%F %T')" \
     -b "@$agent end-to-end check of the cloud deployment: please reply on this Issue with one sentence confirming you received it.")"
-  num="${url##*/}"; echo "opened $url"
+  num="${url##*/}"
+  case "$num" in ''|*[!0-9]*) echo "gh issue create returned no issue URL: $url" >&2; exit 1 ;; *) ;; esac
+  echo "opened $url"
   while [ "$waited" -lt "$ISSUE_WAIT_SECONDS" ]; do
-    count="$(gh api "repos/$repo/issues/$num/comments" --jq "[.[] | select(.user.login==\"$agent\")] | length")"
+    count="$(gh api "repos/$repo/issues/$num/comments" --jq "[.[] | select(.user.login==\"$agent\")] | length" 2>/dev/null || true)"
+    count="${count:-0}"
     [ "$count" -gt 0 ] && break
     sleep 20; waited=$((waited + 20))
   done
