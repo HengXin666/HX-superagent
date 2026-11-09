@@ -15,7 +15,8 @@
   - 本地执行体做成完整的 worker，在本地跑一个 DSH worker 会话，不采用论文里"无状态 daemon 只执行命令"的做法。
   - 云端在 Executor 端口后面加一层路由：本地在线就派给本地，不在线就交给现有的 DshExecutor。
   - 多人隔离按"每人或每组一个实例"来做。
-- MVP 预计 25 到 35 人日，其中最大的不确定性是第 0 步的 spike（2 天），先做它。
+  - 本地 worker 的模型 key 走云端模型代理，按租户配额计费（见第 3 节末尾）。
+- MVP 预计 27 到 38 人日，其中最大的不确定性是第 0 步的 spike（2 天），先做它。
 
 ## 1. 现有架构离目标差在哪
 
@@ -75,6 +76,27 @@
   2. 中途切换执行者时，本地会话的推理上下文带不过去，只能靠 Report、Input 加 recovery note 接力。这和现在重启后的恢复行为一样，不算新增的风险。
   3. 和论文"daemon 不存状态"的设定不同：会话日志落在本地。云端对每个 Assignment 只保存结果。
 
+### 本地 worker 的模型 key：云端代理（已定）
+
+结论：本地 worker 不持有任何模型厂商的 key。本地 DSH 的 `llm-deepseek` 把 `baseURL` 指向云端模型代理，凭据引用里放的是本设备的 runner token。代理校验 token，查出所属租户，扣配额，再把请求头里的 `x-api-key` 换成云端的厂商 key 转发出去。云端兜底的 worker 也走同一个代理，这样一个租户的全部用量都记在同一本账上。
+
+依据"凭据不出机器"的原则来划边界：
+- 用户的代码、git/gh 凭据和内网只留在本地。
+- 厂商 key 只留在云端代理所在的机器上。
+- 本地设备只拿到一个可以吊销、只能在配额内调模型的 runner token。
+
+选它而不选 BYOM，是因为整体更省事：
+1. **本地零代码。** DSH 原生支持这种接法（dsh 0.2.1-rc.2 源码）：`dsh-llm-deepseek` 的 `baseURL` 可配，也可以从 `$DEEPSEEK_BASE_URL` 读取，默认值是 `https://api.deepseek.com/anthropic`；`dsh-llm-deepseek-api-key` 把 `apiKeyEnv` 指向的凭据作为 `x-api-key` 发出。L1 只需要在本地 profile 里写上这两项。
+2. **吊销只有一处。** 设备丢了或人离开了，吊销 runner token，派活和模型调用会同时停掉。BYOM 则要求每台设备各存一把厂商 key，泄露时只能去厂商那边一把把地轮换。
+3. **配额本来就要做。** 多租户计费和防滥用迟早要做；做在代理上只需要一个计量点。BYOM 的用量分散在各人自己的厂商账户里，云端看不到。
+4. **用户不用去开厂商账户。** 本地只要装 DSH 并登记一个 token。
+
+代价：
+- 要新增一个代理，即 M1，2 到 3 人日。它要透传 Anthropic Messages 的流式响应和 Files API（图片），从流里的 usage 计量，超出配额时返回 429。
+- 每个模型请求多绕一跳云端。只多在模型请求上，不在工具调用上；模型请求本来就要出公网，增加的只是一次 RTT。
+- 云端挂了，本地也调不了模型。不过云端挂了本来就不会派活，这不算新增的故障面。
+- 允许租户自己在本地 profile 里改回自带 key，作为逃生口。这样做的用量不进配额，MVP 不为它做任何事。
+
 ## 4. 多人隔离怎么做
 
 方案 I，每人或每组一个实例（推荐）
@@ -100,13 +122,14 @@
 | C1 | 云端 RoutingExecutor | 实现 `Executor` 端口：本地在线就派给 RemoteExecutor，否则交给 DshExecutor；记录每个 Assignment 落在哪里，面板上显示 | 3 到 4 |
 | C2 | runner 网关 | 设备注册、token 签发与吊销、心跳与在线判定；下发 Assignment 和 Input，接收 Report 和回合结束事件，并按 id 幂等去重 | 4 到 5 |
 | C3 | worker 工具代理 | 把 ack、report、thread_follow、thread_unrelated、trigger_handback 和读资源接口包成 HTTP 或 RPC，本地工具调用时打回云端 | 3 |
-| L1 | 本地 runner 插件 | 领取 Assignment，在本地跑 prepare，创建 worker 会话，从云端拉取提示词组合，在本地装 git/gh shim，处理 30 分钟后台作业规则和 slot 的上报 | 6 到 8 |
+| L1 | 本地 runner 插件 | 领取 Assignment，在本地跑 prepare，创建 worker 会话，从云端拉取提示词组合，在本地装 git/gh shim，处理 30 分钟后台作业规则和 slot 的上报；本地 profile 的 `llm-deepseek` 指向 M1（`baseURL` 加 runner token 凭据） | 6 到 8 |
+| M1 | 云端模型代理 | 透传 Anthropic Messages（流式）和 Files API；用 runner token 识别租户，按 usage 计量，超出配额返回 429；把厂商 key 换进 `x-api-key`。和 C2 共用设备 token 的签发与吊销 | 2 到 3 |
 | F1 | 回退与补跑 | 租约加 fencing token：云端接手后，旧 runner 的报告一律拒收；掉线超过阈值就由云端带 recovery note 接手；本地上线后只领取新的 Assignment，不抢回已在云端运行的 | 3 到 4 |
-| T1 | 每租户实例 | profile 模板和开通脚本、按租户签发 hxr_ key 与 runner token、云端兜底 worker 的 OS 用户或容器隔离 | 4 到 6 |
+| T1 | 每租户实例 | profile 模板和开通脚本、按租户签发 hxr_ key 与 runner token、给每个租户设模型配额、云端兜底 worker 的 OS 用户或容器隔离 | 4 到 6 |
 | K1 | 安全 | runner 只出不进；本地侧沿用 hx_edge 的命令白名单作为第二道闸；凭据只在本地；云端被攻破时，影响范围限于该租户自己的设备 | 2 到 3 |
 | Q1 | 测试与联调 | 假 runner 和真 DSH 各跑一遍：本地在线、本地掉线由云端接手、本地回来不重复执行、两个租户之间互相不可见 | 3 到 4 |
 
-合计 30 到 39 人日；如果 S0 证明 DSH 自带的通道可用，C2 和 L1 能省 4 到 5 天，就是开头说的 25 到 35 人日。
+合计 32 到 42 人日；如果 S0 证明 DSH 自带的通道可用，C2 和 L1 能省 4 到 5 天，就是开头说的 27 到 38 人日。
 
 暂不做的事，以及理由：
 - 论文 5.1 的"无状态计算容器"：单租户单实例时，SQLite 加每小时检查已经够用。等到需要水平扩展时，再把 Store 换成 Postgres，约 8 到 10 人日。
@@ -117,12 +140,12 @@
 ## 6. 建议顺序
 
 1. S0 spike（2 天），结论决定 C2 和 L1 用哪种通道。
-2. C1、C3 和 L1 并行，F1 紧跟 C1。
+2. C1、C3 和 L1 并行，F1 紧跟 C1；M1 和 C2 一起做，因为两者共用设备 token。
 3. T1 和 K1 在 F1 之后做，最后用 Q1 收口。
 4. 每一步都不改 Engine 和领域模型。如果要改，说明方案偏了，先停下来重新评估。
 
 ## 7. 待验证
 
 - DSH 是否支持按会话切换 fs 和 subprocess 的 provider。这只影响"以后要不要支持方案 A"，不影响推荐路线。
-- 本地 worker 的模型 key 从哪里来：用户自带（论文里的 BYOM），还是云端代理。这会影响计费归属和凭据面，要由使用方决定。
+- 云端模型代理透传 Files API 时，图片上传的配额和过期清理（`fileQuotaCleanupBatch`）是否需要按租户隔离。模型 key 的归属已定为云端代理，见第 3 节末尾。
 - `dsh-api-remotes` 的 Peer 访问模型能不能直接当租户边界用。如果能，T1 能省一部分。
