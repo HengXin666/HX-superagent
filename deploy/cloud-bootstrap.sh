@@ -310,7 +310,7 @@ step_github_user() {
   (cd "$CHECKOUT" && docker compose exec -T gateway python -c 'import hx_email.api.impl.router.github_user_routes') \
     || { echo "the running gateway image predates github_user; rerun: deploy/cloud-bootstrap.sh gateway" >&2; exit 1; }
   (cd "$CHECKOUT" && docker compose exec -T gateway "$GATEWAY_GH_CLI" api user --jq '"gh-agent inside the gateway: " + .login') \
-    || { echo "gh-agent inside the gateway cannot read the account; check GH_AGENT_CONFIG_DIR in .env and its owner (uid 1000)" >&2; exit 1; }
+    || { echo "gh-agent inside the gateway cannot read the account; check GH_AGENT_CONFIG_DIR in .env and that it belongs to uid APP_UID" >&2; exit 1; }
   # Admin login with the .env credentials, save + check the instance, keep its id. Nothing secret is printed.
   local id
   id="$(cd "$CHECKOUT" && python3 "$CHECKOUT/deploy/github-user-instance.py" "$SUPERAGENT_GITHUB_REPOSITORY" "$GATEWAY_GH_CLI" "$STATE_DIR/github_user_instance" "$HX_EMAIL_BACKEND_PORT")"

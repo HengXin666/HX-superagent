@@ -180,6 +180,8 @@ Steps 3 to 6 are what `deploy/cloud-bootstrap.sh collaborator configure` runs (Â
 
 `gh auth login` asks GitHub for its minimum scopes (`repo`, `read:org`, `gist`). The `repo` scope is account-wide, which is why the account itself must hold access to nothing but this repository. A fine-grained PAT limited to the repository (`gh-agent auth login --with-token`) narrows this further. Check that the PAT can read notifications before relying on it.
 
+**More repositories.** `deploy/grant-agent-repos.sh` invites the agent to the owner's recently pushed repositories (owned, not archived, not forks, pushed within `DAYS`=30, at most `MAX`=15). It is a dry run unless `GRANT=1`; with it, the script invites, accepts as `gh-agent`, and prints each repository with the agent's role. A personal account's collaborators always get write and never admin. This widens what the agent can push to. The GitHub Source still listens to one repository only, but the agent's `gh` can act on every repository it is invited to.
+
 For the first trial, a private repository with only a README was used (`HengXin666/dsh-superagent-sandbox`). `deploy/cloud-bootstrap.sh issue` opens a real Issue there that mentions the agent; watch the panel's Tickets view while it waits.
 
 ## Gateway instances and hxrouter sessions
