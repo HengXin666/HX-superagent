@@ -1,7 +1,9 @@
 // First-start settings for the compose deployment, through the management API on 127.0.0.1.
 // Fills only what is still empty, so anything later changed in the panel is left alone:
 //   source:hxrouter  baseUrl = HX_ROUTER_BASE_URL, tokenEnv = HX_ROUTER_TOKEN, enabled, githubInstance
-//   source:github    repository = SUPERAGENT_GITHUB_REPOSITORY, cli = /usr/local/bin/gh-agent (only when set)
+//   source:github    repository = SUPERAGENT_GITHUB_REPOSITORY, cli = SUPERAGENT_GITHUB_CLI or /usr/local/bin/gh-agent (only when set)
+// With --github-instance it does one thing instead: set source:hxrouter githubInstance = HX_ROUTER_GITHUB_INSTANCE,
+// overwriting the current value (deploy/cloud-bootstrap.sh github-user, after the gateway instance passed its check).
 const port = process.env.SUPERAGENT_PORT || '3082'
 const api = process.env.SUPERAGENT_API || `http://127.0.0.1:${port}/orchestrator/api`
 const headers = { 'x-orchestrator-request': '1', 'content-type': 'application/json' }
@@ -40,6 +42,13 @@ async function update(id, change) {
 const baseUrl = (process.env.HX_ROUTER_BASE_URL || '').trim()
 const githubInstance = Number(process.env.HX_ROUTER_GITHUB_INSTANCE || 0)
 const repository = (process.env.SUPERAGENT_GITHUB_REPOSITORY || '').trim()
+const cli = (process.env.SUPERAGENT_GITHUB_CLI || '/usr/local/bin/gh-agent').trim()
+
+if (process.argv.includes('--github-instance')) {
+  if (!(githubInstance > 0)) { console.error('configure: HX_ROUTER_GITHUB_INSTANCE must be a positive instance id'); process.exit(1) }
+  await update('hxrouter', ({ enabled, config }) => config.githubInstance === githubInstance ? undefined : { enabled, config: { ...config, githubInstance } })
+    .then(() => process.exit(0), error => { console.error(`configure: ${error.message}`); process.exit(1) })
+}
 
 let failed = false
 if (baseUrl) {
@@ -51,7 +60,7 @@ if (baseUrl) {
 if (repository) {
   await update('github', ({ enabled, config }) => {
     if (config.repository) return undefined
-    return { enabled: true, config: { ...config, repository, cli: '/usr/local/bin/gh-agent' } }
+    return { enabled: true, config: { ...config, repository, cli } }
   }).catch(error => { failed = true; console.error(`configure: ${error.message}`) })
 }
 process.exit(failed ? 1 : 0)
