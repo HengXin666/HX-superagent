@@ -6,6 +6,8 @@ This page reproduces the first cloud deployment of 2026-11-10 (Debian 13, user `
 
 Run as the deployment user (here `loli`), from the checkout, in bash. `REPO` is the one repository the agent works in.
 
+Paste the block **one line at a time**, or as a block that keeps its line breaks. Joined onto one line, the words run into the previous command: `git pull deploy/cloud-bootstrap.sh …` makes git treat the script path as a remote (`fatal: 'deploy/cloud-bootstrap.sh' does not appear to be a git repository`). Switch user with `su - loli` (or `sudo -iu loli`), not plain `su loli`, so that the login environment (HOME, PATH, the user's systemd session) is loli's own. `gh-agent` lives in `~/.local/bin`, which a fresh shell may not have on PATH, so the blocks call it by its full path. The person's sign-in (step 2) cannot be scripted, so there are always at least two runs of the script.
+
 ```sh
 # 0. root, once (step 1 prints this line if anything is missing)
 apt-get install -y git curl xz-utils python3 tmux gh docker.io docker-compose-plugin
@@ -16,7 +18,7 @@ git clone https://github.com/HengXin666/HX-superagent.git ~/ai-dev/HX-superagent
 MODEL_FROM_PROFILE=web deploy/cloud-bootstrap.sh all     # omit MODEL_FROM_PROFILE on a machine with no other profile
 
 # 2. person: sign in the AGENT account (never the owner), see § Agent account, steps 1 to 3
-gh-agent auth login --hostname github.com --git-protocol https --web
+~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web
 
 # 3. GitHub, one command; each step stops with a reason when something is off
 export SUPERAGENT_GITHUB_REPOSITORY=HengXin666/dsh-superagent-sandbox
@@ -31,7 +33,18 @@ deploy/cloud-bootstrap.sh collaborator configure github-user status issue
 | `status` | unit, containers, `dsh-superagent status` (0 ok, 2 part error, 3 waits for setup) | never; prints |
 | `issue` | opens a real Issue mentioning the agent and waits up to `ISSUE_WAIT_SECONDS` (600) for its reply | never; prints the comments, or where to look |
 
-On a machine already installed, update the checkouts first (`git pull` in both), then run `deploy/cloud-bootstrap.sh install gateway service` before step 3: `gateway` rebuilds the gateway image from the current HX-Email checkout and adds `GH_AGENT_CONFIG_DIR` to an older `.env`. The agent replies only once a model key is in place (§ Model).
+On a machine already installed, use this order instead of step 1. `git pull` comes first and on its own line, because the script that runs next is the one it fetches. `install` then fast-forwards the HX-Email checkout, and `gateway` rebuilds the gateway image from it, adds `GH_AGENT_CONFIG_DIR` to an older `.env` and sets `APP_UID`. `gh-agent` goes last, so the run ends by printing which account the agent is signed in as.
+
+```sh
+cd ~/ai-dev/HX-superagent
+git pull --ff-only
+deploy/cloud-bootstrap.sh install gateway service gh-agent
+~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web    # only if the line above says "not signed in"
+export SUPERAGENT_GITHUB_REPOSITORY=HengXin666/dsh-superagent-sandbox
+deploy/cloud-bootstrap.sh collaborator configure github-user status issue
+```
+
+If `git pull --ff-only` refuses, `git status` shows local edits on the server; stash or drop them first. The agent replies only once a model key is in place (§ Model).
 
 ## What runs
 
@@ -136,7 +149,7 @@ The agent is a **separate GitHub user** (a GitHub App cannot read notifications)
 2. Device login on the server. The code is valid for about 15 minutes, and the command keeps polling until then:
 
    ```sh
-   nohup gh-agent auth login --hostname github.com --git-protocol https --web > /tmp/gh-agent-login.log 2>&1 < /dev/null &
+   nohup ~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web > /tmp/gh-agent-login.log 2>&1 < /dev/null &
    cat /tmp/gh-agent-login.log     # "First copy your one-time code: XXXX-XXXX"
    ```
 

@@ -144,7 +144,7 @@ EOF
     echo "agent signed in as: $(gh-agent api user --jq .login)"
   else
     echo "agent not signed in. Run, then have the AGENT account (never the owner) enter the code at github.com/login/device:"
-    echo "  gh-agent auth login --hostname github.com --git-protocol https --web"
+    echo "  ~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web"
     echo "Then: SUPERAGENT_GITHUB_REPOSITORY=<owner>/<repo> deploy/cloud-bootstrap.sh collaborator configure github-user status issue"
   fi
 }
