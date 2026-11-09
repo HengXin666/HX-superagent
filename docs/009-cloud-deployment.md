@@ -91,7 +91,7 @@ This step writes `~/.local/bin/gh-agent` (`GH_CONFIG_DIR=~/.config/gh-agent exec
 
 ### 5. gateway
 
-On the first run, this step writes `.env` in the checkout (mode 600) with a random admin password and `HX_EMAIL_SECRET_KEY`. Keep the file: the secret key encrypts stored credentials. The other values are `HX_EMAIL_DIR=~/ai-dev/HX-Email`, ports 18090/18080/3082, `GH_AGENT_CONFIG_DIR=~/.config/gh-agent` and `HX_ROUTER_GITHUB_INSTANCE=0`. Then:
+On the first run, this step writes `.env` in the checkout (mode 600) with a random admin password and `HX_EMAIL_SECRET_KEY`. Keep the file: the secret key encrypts stored credentials. The other values are `HX_EMAIL_DIR=~/ai-dev/HX-Email`, ports 18090/18080/3082, `GH_AGENT_CONFIG_DIR=~/.config/gh-agent` and `HX_ROUTER_GITHUB_INSTANCE=0`. On every run it also sets `APP_UID` to the user's own uid (`id -u`), the uid the gateway image is built to run as, so the container can read `~/.config/gh-agent` (mode 700). The compose default stays 1000, the superagent image's `node` user, for the all-in-Docker variant. Then:
 
 ```sh
 docker compose up -d --build gateway gateway-web gateway-init    # not `superagent`: it runs on the host
@@ -192,6 +192,6 @@ Open that URL locally, then choose **Superagent** (`/orchestrator`). The token i
 - `dsh plugin add` failed until pnpm was on the user's PATH; the step 1 corepack shim fixes this.
 - A login shell of zsh errors on unmatched globs (`no matches found`), so quote globs or use bash.
 - If `status` says `manually_stopped: true` under systemd, a marker is left over from a tmux `stop`. Delete it, as step 6 does.
-- A bind-mounted `~/.config/gh-agent` must exist before `compose up` and be owned by uid 1000. Otherwise Docker creates it root-owned and gh cannot write to it.
+- A bind-mounted `~/.config/gh-agent` must exist before `compose up` and be owned by the gateway's uid (`APP_UID`). Otherwise Docker creates it root-owned, or the container cannot open it, and gh fails. `github-user` compares the container's `id -u` with yours and stops on a mismatch.
 - The browser terminal of the server's HX-Pxy (v0.15.2) needs a login session unlocked with a TOTP code; API keys get 401 there, so remote runs need a person or plain SSH.
 - The gateway accepts at most 4,000 characters per `POST /messages`, and GitHub rate shaping can queue a send for about a minute.

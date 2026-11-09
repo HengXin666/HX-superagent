@@ -173,14 +173,27 @@ EOF
   fi
   # An .env from an earlier install may predate the github_user mount; point it at the agent's gh dir.
   grep -q '^GH_AGENT_CONFIG_DIR=' "$env" || echo "GH_AGENT_CONFIG_DIR=$GH_AGENT_DIR" >> "$env"
+  # The gateway runs as APP_UID and must read the agent's gh dir (mode 700, owned by this user), so build it
+  # with this user's uid. A changed value is picked up by the --build below.
+  local uid; uid="$(id -u)"
+  if grep -q '^APP_UID=' "$env"; then sed -i "s/^APP_UID=.*/APP_UID=$uid/" "$env"; else echo "APP_UID=$uid" >> "$env"; fi
   # superagent runs on the host under systemd, so only the gateway services come up here.
   # --build rebuilds the gateway image from the current HX-Email checkout (picks up github_user once it is there).
-  (cd "$CHECKOUT" && docker compose up -d --build gateway gateway-web gateway-init)
+  (cd "$CHECKOUT" && docker compose build gateway gateway-web)
+  # Volumes made by an image built for another uid keep that owner; hand them to APP_UID before starting.
+  local project vol
+  project="$(cd "$CHECKOUT" && docker compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')"
+  for vol in "${project}_gateway-data" "${project}_shared"; do
+    if docker volume inspect "$vol" >/dev/null 2>&1; then
+      docker run --rm --user 0 --entrypoint chown -v "$vol:/v" dsh-superagent/hx-email-gateway:local -R "$uid:$uid" /v
+    fi
+  done
+  (cd "$CHECKOUT" && docker compose up -d gateway gateway-web gateway-init)
   if ! (cd "$CHECKOUT" && docker compose wait gateway-init >/dev/null); then
     echo "gateway-init failed:" >&2; (cd "$CHECKOUT" && docker compose logs --no-color --tail 20 gateway-init) >&2 || true
     exit 1
   fi
-  local vol; vol="$(cd "$CHECKOUT" && docker compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')_shared"
+  vol="${project}_shared"
   mkdir -p "$STATE_DIR"
   local tmp="$STATE_DIR/hx_router_token.new"
   if ! docker run --rm --entrypoint cat -v "$vol:/shared:ro" dsh-superagent/hx-email-gateway:local /shared/hx_router_token > "$tmp" || [ ! -s "$tmp" ]; then
@@ -288,7 +301,10 @@ step_github_user() {
   say "github-user: gateway github_user instance for $SUPERAGENT_GITHUB_REPOSITORY, wired as hxrouter githubInstance"
   need_repo
   agent_login > /dev/null
-  [ "$(id -u)" = 1000 ] || echo "warning: uid $(id -u) is not 1000; the gateway container (uid 1000) may not read $GH_AGENT_DIR" >&2
+  local host_uid gw_uid
+  host_uid="$(id -u)"
+  gw_uid="$(cd "$CHECKOUT" && docker compose exec -T gateway id -u)"
+  [ "$gw_uid" = "$host_uid" ] || { echo "the gateway runs as uid $gw_uid but $GH_AGENT_DIR belongs to uid $host_uid; rerun: deploy/cloud-bootstrap.sh gateway" >&2; exit 1; }
   [ -f "$HX_EMAIL_DIR/server/src/hx_email/api/impl/router/github_user_routes.py" ] \
     || { echo "HX-Email at $HX_EMAIL_DIR has no github_user platform; update it, then rerun the gateway step" >&2; exit 1; }
   (cd "$CHECKOUT" && docker compose exec -T gateway python -c 'import hx_email.api.impl.router.github_user_routes') \

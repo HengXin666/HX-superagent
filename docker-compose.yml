@@ -26,8 +26,9 @@ x-gateway-build: &gateway-build
   context: ./deploy
   dockerfile: gateway.Dockerfile
   args:
-    # Must equal the superagent image's node uid: both containers write the gh-agent dir and /shared.
-    APP_UID: "1000"
+    # Must equal the uid that owns GH_AGENT_CONFIG_DIR: the superagent image's node uid (1000) here, where both
+    # containers write the gh-agent dir and /shared. The bare-metal install (deploy/cloud-bootstrap.sh) sets the host user's.
+    APP_UID: "${APP_UID:-1000}"
   additional_contexts:
     hxemail: ${HX_EMAIL_DIR:-../../../AI-Code/HX-Email}/server
 
