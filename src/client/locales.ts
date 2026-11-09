@@ -460,6 +460,7 @@ const TEXT = {
   'promptPart.runtime/policy/none': ['策略（没有启用的规则时）', 'Policy (when no rule is enabled)'],
   'promptPart.skill/feishu': ['飞书技能', 'Feishu skill'],
   'promptPart.skill/github': ['GitHub 技能', 'GitHub skill'],
+  'promptPart.skill/hxrouter': ['HX 消息网关技能', 'HX message gateway skill'],
   'promptPart.runtime/environment': ['执行环境', 'Execution environment'],
   promptViewEdit: ['编辑', 'Edit'],
   promptViewFull: ['完整提示词', 'Full prompt'],

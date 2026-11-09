@@ -8,6 +8,8 @@ import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullCheck
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
+import type { GithubGateway } from './github-gateway.ts'
+import type { HxRouterConfig } from './hxrouter-loops.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
 import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
 import { health, sourceContext, type Health, type SourceContext } from './host.ts'
@@ -109,10 +111,24 @@ export const githubKind: SourceKind<GithubConfig> = {
 }
 export const name = 'dsh-superagent-github'
 export const inject = ['orchestrator']
+/**
+ * The GitHub Source kind whose replies go through `gateway()` when it names one: the HX-Email gateway's `github_user` instance set on
+ * the enabled HX-Email Source. Inbound stays here either way, so a Thread keeps one Ticket.
+ */
+export function githubKindWith(gateway: () => GithubGateway | undefined): SourceKind<GithubConfig> {
+  return { ...githubKind, channel: { link: githubLink, send: (host, message) => sendGithub(host, message, gateway()) } }
+}
+/** The `github_user` instance the enabled HX-Email Source names for GitHub replies, with its gateway connection. */
+export function configuredGateway(instance: { enabled: boolean; config: HxRouterConfig } | undefined): GithubGateway | undefined {
+  if (!instance?.enabled || !instance.config.githubInstance) return undefined
+  const { baseUrl, tokenEnv, githubInstance } = instance.config
+  return { connection: { baseUrl, tokenEnv }, instance: githubInstance }
+}
 export function apply(ctx: Context): void {
-  ctx.effect(() => ctx.orchestrator.sources.register(githubKind), 'github: source kind')
+  const kind = githubKindWith(() => configuredGateway(ctx.orchestrator.sources.instance<HxRouterConfig>('hxrouter')))
+  ctx.effect(() => ctx.orchestrator.sources.register(kind), 'github: source kind')
   ctx.effect(() => {
-    const source = sourceContext(ctx.orchestrator, githubKind)
+    const source = sourceContext(ctx.orchestrator, kind)
     const controller = new AbortController()
     // Unhandled rejections terminate the DSH process, so a failure escaping the polling loop is reported as source health instead.
     const running = watch(source, controller.signal)

@@ -18,6 +18,7 @@ import type { Sessions } from './sessions.ts'
 import type { Settings } from './settings.ts'
 import { KV } from '../kv.ts'
 import type { Store } from './store.ts'
+import type { TriggerContext } from '../sources/kind.ts'
 import type { TextCache } from './cache.ts'
 
 /** Resource descriptors exposed via orchestrator_read, marking which resources worker sessions may also read for their own ticket. */
@@ -52,6 +53,8 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'hxrouter/<trigger-id>/thread', holds: 'the HX-Email gateway session of a trigger: its messages up to and including the trigger, newest page first; follow next_resource for older ones', executor: true },
+  { name: 'hxrouter/<trigger-id>/parent', holds: 'the HX-Email gateway message a trigger replies to', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
@@ -68,6 +71,8 @@ export interface ResourceHost {
   mayRead(sessionId: string, revision: number): boolean
   feishuPageSize(): number
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
+  /** The Source's context reader for a trigger, which `hxrouter/` resources read through. */
+  threadContext?(trigger: Trigger): TriggerContext | undefined
 }
 export interface MainResourceHost extends ResourceHost {
   readonly sessions: Pick<Sessions, 'status' | 'modelRetry'>
@@ -104,7 +109,7 @@ const trigger = (host: ResourceHost, id: string, ticketId?: string): Trigger => 
 async function sourcePage(read: Read, source: string, fetch: () => Promise<unknown>) {
   const { host, resource, offset, sessionId } = read
   const body = offset === 0 ? JSON.stringify(await fetch()) : host.pages.get(`${sessionId}:${resource}`)
-  if (body === undefined) throw new Error(`Read this ${source === 'feishu' ? 'Feishu' : 'GitHub'} resource from offset 0 first`)
+  if (body === undefined) throw new Error(`Read this ${source === 'feishu' ? 'Feishu' : source === 'hxrouter' ? 'HX-Email' : 'GitHub'} resource from offset 0 first`)
   if (offset === 0) host.pages.set(`${sessionId}:${resource}`, body)
   return text(read, body)
 }
@@ -207,6 +212,20 @@ const ROUTES: readonly Route[] = [
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
   ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['hxrouter/', async read => {
+    const [id, part, cursor, ...more] = read.rest.split('/')
+    if (!id || (part !== 'thread' && part !== 'parent') || more.length || (cursor !== undefined && part !== 'thread')) {
+      throw new Error('Use hxrouter/<trigger-id>/thread or /parent; follow returned next_resource for another page')
+    }
+    const source = trigger(read.host, id, read.ticketId)
+    const context = source.source === 'hxrouter' ? read.host.threadContext?.(source) : undefined
+    if (!context) throw new Error('An HX-Email source trigger is required')
+    const commands = read.host.commands.withSignal(read.signal)
+    return sourcePage(read, 'hxrouter', async () => {
+      const page = await context.read(commands, part, cursor === undefined ? undefined : decodeURIComponent(cursor))
+      return { ...page.body, next_resource: page.next ? `hxrouter/${id}/thread/${encodeURIComponent(page.next)}` : null }
+    })
+  }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')
@@ -226,6 +245,7 @@ const ROUTES: readonly Route[] = [
     const around = { before: shown(neighbours.before), after: shown(neighbours.after) }
     return { ...card, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
       ...(ref ? { context: feishuReferences(ref) } : {}),
+      ...(found.source === 'hxrouter' ? { context: { thread: `hxrouter/${found.id}/thread`, parent: `hxrouter/${found.id}/parent` } } : {}),
       ...(offset === 0 ? {
         ...repliedTo ? { replied_to: triggerLine(repliedTo) } : {},
         around: { ...around.before ? { before: triggerLine(around.before) } : {}, ...around.after ? { after: triggerLine(around.after) } : {} },

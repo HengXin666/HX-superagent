@@ -245,3 +245,16 @@ describe('overrides of built-in parts', () => {
     })
   })
 })
+
+
+describe('hark secretary example prompt configuration', () => {
+  it('appends the persona to the built-in orchestrator text only, from the current built-in text', async () => {
+    const { readFileSync } = await import('node:fs')
+    const config = JSON.parse(readFileSync(join(import.meta.dirname, '../examples/hark-secretary.prompts.json'), 'utf8')) as PromptConfig
+    const override = config.overrides!['runtime/orchestrator']!
+    expect(override.text.startsWith(masterPrompt)).toBe(true)
+    expect(override.base).toBe(builtInBase(masterPrompt))
+    expect(composePrompt(config, 'orchestrator')).toContain('## 人设 (hark 秘书)')
+    expect(composePrompt(config, 'worker')).not.toContain('人设')
+  })
+})

@@ -1,0 +1,11 @@
+node_modules
+lib
+.artifacts
+.git
+.hark
+.ruff_cache
+.env
+coverage
+deploy/dsh-seed
+deploy/gh-agent
+dsh-superagent-explained.html

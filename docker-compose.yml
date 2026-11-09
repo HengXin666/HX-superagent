@@ -1,0 +1,125 @@
+# dsh-superagent + HX-Email messaging gateway, one command:
+#
+#   cp deploy/compose.env.example .env   # edit secrets and paths first
+#   docker compose up -d --build
+#
+# Services (all host networking, see below):
+#   gateway       HX-Email backend (the messaging router), 127.0.0.1:${HX_EMAIL_BACKEND_PORT:-18090}
+#   gateway-web   HX-Email web UI, http://127.0.0.1:${HX_EMAIL_HTTP_PORT:-18080} (create QQ / github_user instances here)
+#   gateway-init  one-shot: logs in as the gateway admin, issues an hxr_ router key once and
+#                 writes it to the shared volume; reruns only check that the key still works
+#   superagent    dsh --profile superagent, panel at http://127.0.0.1:${SUPERAGENT_PORT:-3082}/orchestrator
+#
+# Wiring: superagent reads the key from the shared volume into HX_ROUTER_TOKEN (never into settings),
+# and on its first start points the hxrouter Source at http://127.0.0.1:${HX_EMAIL_BACKEND_PORT:-18090}.
+#
+# Why host networking: the superagent management API refuses any Web server host but 127.0.0.1
+# and any Host header but 127.0.0.1:<port> (src/app/http.ts), and the gateway's own compose binds
+# its backend to loopback for the same reason. Linux only; Docker Desktop needs host networking enabled.
+#
+# You supply: the model key (DEEPSEEK_API_KEY in .env, or a .credentials.yaml in deploy/dsh-seed) and
+# the agent's GitHub sign-in (GH_AGENT_CONFIG_DIR, a gh config dir signed in as the agent account).
+
+name: dsh-superagent
+
+x-gateway-build: &gateway-build
+  context: ./deploy
+  dockerfile: gateway.Dockerfile
+  args:
+    # Must equal the superagent image's node uid: both containers write the gh-agent dir and /shared.
+    APP_UID: "1000"
+  additional_contexts:
+    hxemail: ${HX_EMAIL_DIR:-../../../AI-Code/HX-Email}/server
+
+x-gateway-env: &gateway-env
+  HX_EMAIL_DATA_DIR: /data
+  HX_EMAIL_ADMIN_USERNAME: ${HX_EMAIL_ADMIN_USERNAME:-admin}
+  HX_EMAIL_ADMIN_PASSWORD: ${HX_EMAIL_ADMIN_PASSWORD:-admin}
+  HX_EMAIL_BACKEND_PORT: ${HX_EMAIL_BACKEND_PORT:-18090}
+
+services:
+  gateway:
+    build: *gateway-build
+    image: dsh-superagent/hx-email-gateway:local
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      <<: *gateway-env
+      HX_EMAIL_SECRET_KEY: ${HX_EMAIL_SECRET_KEY:-}
+      HX_EMAIL_BIND_HOST: 127.0.0.1
+      # No docker.sock here, so the gateway's self-update stays off.
+      HX_EMAIL_UPDATE_ENABLED: "false"
+    volumes:
+      - gateway-data:/data
+      # gh config of the agent account, for github_user instances (cli: /usr/local/bin/gh-agent).
+      # Create it on the host first (owned by uid 1000), or docker makes it root-owned and gh cannot write.
+      - ${GH_AGENT_CONFIG_DIR:-./deploy/gh-agent}:/gh-agent
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ['HX_EMAIL_BACKEND_PORT']+'/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  gateway-web:
+    build: ${HX_EMAIL_DIR:-../../../AI-Code/HX-Email}/web
+    image: dsh-superagent/hx-email-web:local
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      LISTEN_PORT: ${HX_EMAIL_HTTP_PORT:-18080}
+      API_TARGET: http://127.0.0.1:${HX_EMAIL_BACKEND_PORT:-18090}
+
+  gateway-init:
+    # Same build as gateway (cached), so compose never tries to pull this local tag.
+    build: *gateway-build
+    image: dsh-superagent/hx-email-gateway:local
+    network_mode: host
+    restart: "no"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      <<: *gateway-env
+      HX_ROUTER_BASE_URL: http://127.0.0.1:${HX_EMAIL_BACKEND_PORT:-18090}
+      HX_ROUTER_TOKEN_FILE: /shared/hx_router_token
+      HX_ROUTER_KEY_NAME: dsh-superagent
+    volumes:
+      - shared:/shared
+      - ./deploy/gateway-init.py:/gateway-init.py:ro
+    entrypoint: ["python", "/gateway-init.py"]
+
+  superagent:
+    build:
+      context: .
+      dockerfile: deploy/superagent.Dockerfile
+    image: dsh-superagent/superagent:local
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    environment:
+      SUPERAGENT_PORT: ${SUPERAGENT_PORT:-3082}
+      HX_ROUTER_BASE_URL: http://127.0.0.1:${HX_EMAIL_BACKEND_PORT:-18090}
+      HX_ROUTER_TOKEN_FILE: /shared/hx_router_token
+      # Optional first-start settings; later changes belong in the panel.
+      HX_ROUTER_GITHUB_INSTANCE: ${HX_ROUTER_GITHUB_INSTANCE:-0}
+      SUPERAGENT_GITHUB_REPOSITORY: ${SUPERAGENT_GITHUB_REPOSITORY:-}
+      # Model: the web template's DeepSeek provider reads credential ref DEEPSEEK_API_KEY, from
+      # $DSH_HOME/.credentials.yaml first, then this environment. Empty is unset by the entrypoint.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - dsh-home:/home/node/.dsh
+      - shared:/shared:ro
+      - ${DSH_SEED_DIR:-./deploy/dsh-seed}:/seed:ro
+      - ${GH_AGENT_CONFIG_DIR:-./deploy/gh-agent}:/gh-agent
+    stop_grace_period: 5m
+
+volumes:
+  gateway-data:
+  shared:
+  dsh-home:
