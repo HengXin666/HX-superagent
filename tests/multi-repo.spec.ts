@@ -139,6 +139,31 @@ describe('polling an extra GitHub instance', () => {
     expect(h.board.all.github?.state).not.toBe('ready')
     h.store.close()
   })
+  it('takes in an Issue whose notification GitHub listed only after the cursor passed the Issue, once, and skips it in later rounds', async () => {
+    const h = host()
+    const now = Date.now()
+    // The previous round moved the cursor past the Issue before its notification was listed (#44 on 2026-11-10: Issue 15:52:28,
+    // cursor about 15:52:40, notification listed in the round of 15:53:48).
+    h.store.set(`github-2/${KV.github.since}` as typeof KV.github.since, new Date(now - 20_000).toISOString())
+    const created = new Date(now - 32_000).toISOString()
+    const opened = { ...issue(44, '@agent-bot reply with one sentence'), created_at: created }
+    const reads = github({
+      [`repos/${GADGETS}/notifications`]: [{ repository: { full_name: GADGETS }, updated_at: new Date(now - 10_000).toISOString(),
+        subject: { url: `https://api.github.com/repos/${GADGETS}/issues/44` } }],
+      [`repos/${GADGETS}/issues/44`]: opened,
+    })
+    await pollRound(h.gadgets)
+    const listed = reads.find(path => path.startsWith(`repos/${GADGETS}/notifications`))!
+    expect(Date.parse(decodeURIComponent(/since=([^&]+)/.exec(listed)![1]!))).toBeLessThan(Date.parse(created))
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.source)).toEqual(['github-2'])
+    expect(h.store.threads.get('github-2:44')).toBeDefined()
+    // The next round lists the same notification again (the list looks back) but does not read or deliver it again.
+    reads.length = 0
+    await pollRound(h.gadgets)
+    expect(reads.some(path => path.includes('/issues/44'))).toBe(false)
+    expect(h.receive).toHaveBeenCalledTimes(1)
+    h.store.close()
+  })
   it('binds the agent\'s PR on a ticket\'s branch in an extra repository to that repository\'s Thread', async () => {
     const h = host()
     const ticket: Ticket = { id: 't1', title: 'one', decisionId: 'd1', mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' },

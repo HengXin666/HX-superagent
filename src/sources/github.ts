@@ -25,7 +25,15 @@ export { commentTrigger, type GithubComment } from './github-trigger.ts'
 /** A notification of the agent account; `subject.url` is the API address of its Issue or PR. */
 const NotificationSchema = z.looseObject({
   repository: z.looseObject({ full_name: z.string() }), subject: z.looseObject({ url: z.string().nullish() }),
+  updated_at: z.string().nullish(),
 })
+/**
+ * How long GitHub may take to list a notification after the event behind it. A mention's notification can appear after the
+ * next poll's cursor has already passed the Issue's or comment's own time (seen: an Issue at 15:48:04, its notification
+ * `updated_at` 15:48:27 and first listed in a later round), so the list asks this much further back, and an Issue or PR
+ * seen for the first time is read from this much before the cursor. Reading twice is harmless: Trigger IDs deduplicate.
+ */
+export const NOTIFICATION_LAG_MS = 10 * 60_000
 
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
@@ -391,7 +399,8 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   const since = state.get(KV.github.since) ?? round.started
   if (state.get(KV.github.since) === undefined) state.set(KV.github.since, since)
   const { repository } = ctx.deployment
-  const path = `notifications?all=true&per_page=50&since=${encodeURIComponent(since)}`
+  const lagged = new Date(Date.parse(since) - NOTIFICATION_LAG_MS).toISOString()
+  const path = `notifications?all=true&per_page=50&since=${encodeURIComponent(lagged)}`
   const raw = await commands.api(path, '--include')
   const split = raw.search(/\r?\n\r?\n/)
   if (split < 0) throw new Error('GitHub returned no HTTP headers')
@@ -410,7 +419,10 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
     const address = githubAddress(notification.subject.url ?? '', repository)
     if (!address || address.discussion || items.has(address.number)) continue
     const { number, pr } = address
-    items.set(number, { since: [state.get(KV.github.cursor(number)) ?? since, since].sort().at(-1)!, pr })
+    const cursor = state.get(KV.github.cursor(number))
+    // Listed again only because the list looks back NOTIFICATION_LAG_MS: read after its last update already.
+    if (cursor && notification.updated_at && Date.parse(cursor) >= Date.parse(notification.updated_at)) continue
+    items.set(number, { since: [cursor ?? lagged, lagged].sort().at(-1)!, pr })
   }
   for (const [number, item] of items) {
     if (stopped(ctx, round)) return { count: notifications.length, interval }
