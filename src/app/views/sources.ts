@@ -13,11 +13,14 @@ export type HealthMap = Record<string, Health>
 export function sourceHealth(sources: SourceRegistry, instance: SourceInstance, health: HealthMap) {
   const kind = sources.kind(instance.kind)
   const starting: Health = { state: 'starting', detail: '' }
-  const parts = (kind?.health ?? []).map(name => {
-    const entry = health[name]
-    return { name, ...(!entry || (instance.enabled && entry.code === 'sourceOff') ? starting : entry) }
+  // An extra instance of a multi-instance kind reports under `<entry>@<id>` and shows the entry by the kind's name.
+  const names = kind && kind.kind !== instance.id ? kind.health.map(name => [name, `${name}@${instance.id}`] as const)
+    : (kind?.health ?? []).map(name => [name, name] as const)
+  const parts = names.map(([name, entry]) => {
+    const value = health[entry]
+    return { name, ...(!value || (instance.enabled && value.code === 'sourceOff') ? starting : value) }
   })
-  return { id: instance.id, title: kind?.title ?? { zh: instance.id, en: instance.id }, health: parts }
+  return { id: instance.id, title: kind ? sources.title(instance.id) : { zh: instance.id, en: instance.id }, health: parts }
 }
 export interface SetupState {
   /** Resolved deployment facts; undefined while waiting for initial setup. */
@@ -27,7 +30,12 @@ export interface SetupState {
   /** Feishu bot check failure that pauses only the Feishu Source. */
   feishuProblem?: SetupProblem | undefined
 }
-export const problemOf = (id: string, setup: SetupState) => [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
+/** The setup problem shown on instance `id`: a setup failure of its place, or why setup left an extra GitHub instance out. */
+export function problemOf(id: string, setup: SetupState): SetupProblem | undefined {
+  const left = setup.deployment?.repositoryProblems?.[id]
+  if (left) return { place: 'github', code: 'githubInstanceLeftOut', values: { problem: left }, detail: `Setup left this repository out: ${left}` }
+  return [setup.problem, setup.feishuProblem].find(problem => problem?.place === id)
+}
 /** Source lifecycle state in priority order: missing kind, disabled, setup/part error, blocked on global setup, starting, paused, or ready. */
 export type SourceState = 'missing' | 'off' | 'error' | 'setup' | 'starting' | 'paused' | 'ready'
 function sourceState(instance: SourceInstance & { installed: boolean }, parts: { state: string }[], setup: SetupState): SourceState {

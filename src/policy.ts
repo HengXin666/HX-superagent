@@ -95,7 +95,9 @@ export const ExecutorConfigSchema = z.object({
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
-export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+/** A stored Source instance; `kind` names the Source kind of an extra instance of a multi-instance kind (such as `github-2`), whose id is not the kind. */
+export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}),
+  kind: z.string().regex(/^[a-z][a-z0-9-]*$/).optional() }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
@@ -104,7 +106,7 @@ export const SettingsSchema = z.object({
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}` | `instances:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

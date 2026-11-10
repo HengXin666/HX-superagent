@@ -205,6 +205,18 @@ For the first trial, a private repository with only a README was used (`HengXin6
 
 The profile's model entries name a credential (for example `TOKENJUICE_API_KEY` or `DEEPSEEK_API_KEY`). Put the key in `~/.dsh/.credentials.yaml` (mode 600) or in the unit's environment. Without it, the runtime starts but cannot assess or run work.
 
+## More repositories
+
+Add repositories in the panel's **GitHub repositories** table, or from the checkout:
+
+```sh
+SUPERAGENT_PORT=38470 node deploy/configure.mjs --repositories owner/one,owner/two   # each missing one becomes a GitHub instance
+SUPERAGENT_PORT=38470 node deploy/configure.mjs --allow-github <login>             # adds the login on every repository's list
+SUPERAGENT_PORT=38470 node deploy/configure.mjs --show                             # one line per extra repository
+```
+
+The agent account must be able to push to each repository (`collaborator` step per repository). A repository that replies through the gateway needs its own `github_user` instance there; set its number on that repository's card (**Gateway github_user instance**).
+
 ## Panel
 
 ```sh

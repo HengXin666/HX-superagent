@@ -52,7 +52,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
-  { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes; github-<n>/… reads the same from the repository of GitHub instance github-<n>', executor: true },
   { name: 'hxrouter/<trigger-id>/thread', holds: 'the HX-Email gateway session of a trigger: its messages up to and including the trigger, newest page first; follow next_resource for older ones', executor: true },
   { name: 'hxrouter/<trigger-id>/parent', holds: 'the HX-Email gateway message a trigger replies to', executor: true },
 ]
@@ -319,10 +319,12 @@ const ROUTES: readonly Route[] = [
 export async function readResource(host: ResourceHost, resource: string, offset: number, limit: number | undefined, ticketId?: string,
   signal?: AbortSignal) {
   const name = resource.replace(/^event\//, 'trigger/').replace(/^task\//, 'ticket/').replace(/^observation\//, 'decision/')
-  const route = ROUTES.find(([route]) => route.endsWith('/') ? name.startsWith(route) : name === route)
+  // An extra GitHub instance's reads (`github-<n>/…`) take the GitHub route, which reads that instance's repository.
+  const route = ROUTES.find(([route]) => route.endsWith('/') ? name.startsWith(route) || (route === 'github/' && /^github-\d+\//.test(name))
+    : name === route)
   if (!route) throw new Error('Unknown context resource')
   const sessionId = ticketId ? workerSessionId(ticketId) : host.masterId
-  const rest = route[0].endsWith('/') ? name.slice(route[0].length) : ''
+  const rest = route[0].endsWith('/') ? name.slice(name.indexOf('/') + 1) : ''
   return route[1]({ host, resource: name, rest, offset, sessionId, ...limit ? { limit } : {}, ...ticketId ? { ticketId } : {},
     ...signal ? { signal } : {} })
 }

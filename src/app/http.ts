@@ -35,7 +35,7 @@ export interface HttpHost {
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
-  readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
+  readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels' | 'saveInstances'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
   readonly health: Record<string, Health>
@@ -224,6 +224,11 @@ function routes(runtime: HttpHost): Routes {
       if (!known) throw new RouteError(404, 'Source not found')
       const request = SaveRequest.parse(await body())
       return runtime.settings.save(block, request.value, request.revision, 'panel')
+    },
+    'PUT sources/:kind/instances': async ({ params, body }) => {
+      const request = z.object({ rows: z.array(z.unknown()), revision: z.number().int().nonnegative() }).parse(await body())
+      if (!runtime.sources.kind(params.kind)?.multiple) throw new RouteError(404, 'Source kind not found')
+      return runtime.settings.saveInstances(params.kind, request.rows, request.revision, 'panel')
     },
     'GET policy/history': () => policyHistory(store, runtime.sources, policyVersion(store.settings())),
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),

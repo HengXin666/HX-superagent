@@ -29,6 +29,12 @@ export interface SourceHost {
 export interface ThreadDescription { label?: string; url?: string; facts?: Record<string, ThreadFact | null> }
 /** Application capabilities exposed to a Source kind for reading state, ingesting triggers, managing threads/tickets, and reporting health. */
 export interface SourceContext {
+  /**
+   * The instance this context serves when its kind takes several (such as `github-2`, one per repository): its Triggers and Threads
+   * carry this ID, `deployment.repository` and `commands` name its repository, and its `state` keys are its own. Undefined serves the
+   * kind's default instance, whose ID is the kind's.
+   */
+  readonly instance?: string
   readonly deployment: Deployment
   readonly commands: Commands
   readonly ready: Promise<void>

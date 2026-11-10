@@ -29,7 +29,7 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Block> = {
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -50,11 +50,38 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     // Only the management panel may switch source accounts.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
+  // The extra instances of one multi-instance kind, as `Settings.saveInstances` normalized them, and the policy parts it gives new ones.
+  instances: {
+    parse: (value, sources, kind) => {
+      const parsed = InstancesValue.parse(value)
+      const owner = sources.kind(kind)
+      if (!owner?.multiple) throw new UserError('notMultiple', { source: kind })
+      return { policy: parsed.policy, instances: Object.fromEntries(Object.entries(parsed.instances).map(([id, stored]) =>
+        [id, { enabled: stored.enabled, config: owner.schema.parse(stored.config), kind }])) }
+    },
+    merge: (settings, value, kind) => {
+      const { instances, policy } = value as z.infer<typeof InstancesValue>
+      const kept = Object.entries(settings.sources).filter(([id, stored]) => id === kind || stored.kind !== kind)
+      return { ...settings, sources: { ...Object.fromEntries(kept), ...instances } as SettingsValue['sources'],
+        policy: { ...settings.policy, sources: { ...settings.policy.sources, ...policy } as SettingsValue['policy']['sources'] } }
+    },
+    guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
+  },
 }
+const InstancesValue = z.object({
+  instances: z.record(z.string(), z.object({ enabled: z.boolean(), config: z.record(z.string(), z.unknown()) })),
+  policy: z.record(z.string(), z.record(z.string(), z.unknown()).and(z.object({ allowed: z.array(z.object({ id: z.string() }).loose()) })))
+    .default({}),
+})
+/** One extra instance row as the panel submits it: an existing `id` keeps that instance, and a row without one adds a new instance. */
+const InstanceRow = z.object({ id: z.string().optional(), enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}),
+  /** An instance whose policy part (allowed senders, bots, admission table) a new instance starts from. */
+  policyFrom: z.string().optional() }).strict()
+export type InstanceRowInput = z.input<typeof InstanceRow>
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
-  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
+  readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get' | 'set' | 'triggers'>
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
   readonly engine: EngineForSettings
@@ -120,7 +147,8 @@ export class Settings {
       policy: { revision: revision('policy'), rules: rules.map(rule => ({ id: rule.id, name: rule.name, enabled: rule.enabled })),
         allowed: Object.fromEntries(Object.entries(parts).map(([id, part]) => [id, part.allowed.length])), read: 'settings/policy' },
       sources: sources.instances(settings).map(({ id, kind, enabled, installed }) =>
-        ({ id, kind, enabled, installed, revision: revision(`source:${id}`), read: `settings/source:${id}` })) }
+        ({ id, kind, enabled, installed, revision: revision(`source:${id}`), read: `settings/source:${id}` })),
+      instances: Object.fromEntries(sources.multipleKinds().map(kind => [kind, { revision: revision(`instances:${kind}`), read: `settings/instances:${kind}` }])) }
   }
   /**
    * Returns one settings block as accepted by `save` (`policy`, `eval`, `executor`, `pause` holding `{ paused }`, or
@@ -131,8 +159,10 @@ export class Settings {
     const { store, sources } = this.host
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
+    const extra = block.startsWith('instances:') ? block.slice('instances:'.length) : undefined
     const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
-      : instance ? { enabled: instance.enabled, config: instance.config } : undefined
+      : instance ? { enabled: instance.enabled, config: instance.config }
+      : extra && sources.kind(extra)?.multiple ? this.instanceRows(extra) : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }
   }
@@ -149,8 +179,8 @@ export class Settings {
     const { store, sources, engine, sessions } = this.host
     const stale = () => revision !== store.blockRevision(block)
     if (stale()) throw new SettingsConflict('Settings changed. Reload before saving.')
-    const id = block.startsWith('source:') ? block.slice(7) : block
-    const kind = block.startsWith('source:') ? 'source' : block
+    const id = block.startsWith('source:') ? block.slice(7) : block.startsWith('instances:') ? block.slice(10) : block
+    const kind = block.startsWith('source:') ? 'source' : block.startsWith('instances:') ? 'instances' : block
     if (!(kind in BLOCKS)) throw new UserError('unknownBlock', { block })
     const rules = BLOCKS[kind as keyof typeof BLOCKS]
     if (kind === 'source' && !sources.kind(id)) throw new UserError('sourceNotInstalled', { source: id })
@@ -211,6 +241,66 @@ export class Settings {
     await sessions.delivery('settings:pause')
     this.host.requestPass()
     return { paused }
+  }
+  /** The extra instances of multi-instance kind `kind`, as `saveInstances` takes them. */
+  instanceRows(kind: string): { id: string; enabled: boolean; config: Record<string, unknown> }[] {
+    const { sources } = this.host
+    return sources.instancesOf(kind).filter(id => id !== kind).flatMap(id => {
+      const instance = sources.instance(id)
+      return instance ? [{ id, enabled: instance.enabled, config: instance.config }] : []
+    })
+  }
+  /**
+   * Replaces the extra instances of multi-instance kind `kind` (such as one GitHub instance per repository) with `rows`, saved as
+   * the `instances:<kind>` block against its `revision`. A row naming an existing instance keeps it (its Threads, cursors and policy
+   * part); a row without an ID adds `<kind>-<n>` under a number never issued before; an instance missing from `rows` is removed.
+   * The account fields the kind shares (`multiple.shared`) stay on the default instance. A new row may start from another
+   * instance's policy part (`policyFrom`). Changing the set of repositories re-runs setup like any account change.
+   * @throws UserError when `kind` has one instance, a row is invalid or repeats another instance's label, the rows exceed the kind's
+   * maximum, a removed instance still has open tickets, or (via setup) the agent account cannot push to an added repository.
+   */
+  async saveInstances(kind: string, rows: unknown, revision: number, origin: SettingsOrigin) {
+    const { store, sources } = this.host
+    const owner = sources.kind(kind)
+    const multiple = owner?.multiple
+    if (!owner || owner.kind !== kind || !multiple) throw new UserError('notMultiple', { source: kind })
+    const parsed = z.array(InstanceRow).parse(rows)
+    const current = store.settings()
+    const existing = sources.instancesOf(kind, current).filter(id => id !== kind)
+    if (parsed.length + 1 > multiple.max) throw new UserError('instancesTooMany', { max: String(multiple.max), source: kind })
+    let number = Math.max(store.get(KV.settings.instanceNumber(kind)) ?? 1,
+      ...existing.map(id => Number(/-(\d+)$/.exec(id)?.[1] ?? 0)))
+    const shared = new Set(multiple.shared)
+    const labels = new Map<string, string>()
+    const primary = sources.instance(kind, current)
+    if (primary) labels.set(multiple.label(primary.config).toLowerCase(), kind)
+    const instances: Record<string, { enabled: boolean; config: Record<string, unknown> }> = {}
+    const policy: Record<string, Record<string, unknown> & { allowed: { id: string }[] }> = {}
+    for (const row of parsed) {
+      const id = row.id !== undefined && existing.includes(row.id) ? row.id : `${kind}-${++number}`
+      if (id in instances) throw new UserError('instanceDuplicate', { label: id })
+      const config = Object.fromEntries(Object.entries(row.config).filter(([key]) => !shared.has(key)))
+      const result = owner.schema.safeParse(config)
+      if (!result.success) throw new UserError('instanceInvalid', { id: String(row.config.repository ?? id), error: result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') })
+      const label = multiple.label(result.data)
+      if (labels.has(label.toLowerCase())) throw new UserError('instanceDuplicate', { label })
+      labels.set(label.toLowerCase(), id)
+      instances[id] = { enabled: row.enabled, config: result.data }
+      const from = row.policyFrom === undefined || existing.includes(id) ? undefined : current.policy.sources[row.policyFrom]
+      if (from) policy[id] = structuredClone(from)
+    }
+    const removed = existing.filter(id => !(id in instances))
+    for (const id of removed) {
+      const open = store.tickets.open().filter(ticket => (ticket.follows ?? []).some(follow => follow.thread.startsWith(`${id}:`))
+        || ticket.channels.some(channel => channel.source === id) || store.triggers.get(ticket.origin.triggerId)?.source === id)
+      const instance = sources.instance(id, current)
+      if (open.length) {
+        throw new UserError('instanceInUse', { id, label: instance ? multiple.label(instance.config) : id, tickets: open.map(ticket => ticket.title).join(', ') })
+      }
+    }
+    const result = await this.save(`instances:${kind}`, { instances, policy }, revision, origin)
+    if (result.saved) store.set(KV.settings.instanceNumber(kind), number)
+    return { ...result, instances: this.instanceRows(kind) }
   }
   /** Returns the IDs of installed, enabled Sources whose policy section can synchronize now (empty while setup is not configured). */
   syncable(): string[] {

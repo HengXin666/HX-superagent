@@ -4,9 +4,10 @@
  */
 import { z } from 'zod'
 import type { OutboundMessage } from '../core/index.ts'
-import { CliError } from '../infra/commands.ts'
+import { CliError, scopedTo } from '../infra/commands.ts'
 import { sameName } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
+import { repositoryOf } from '../deployment.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
 import { githubAddress, githubPage } from './github-trigger.ts'
 import { GATEWAY_TEXT_LIMIT, sendGithubGateway, type GithubGateway } from './github-gateway.ts'
@@ -23,8 +24,11 @@ const missing = (error: unknown): boolean => error instanceof CliError && (error
  * gateway posts it and its idempotency key dedupes retries; a reply over the gateway's text limit still goes out directly.
  */
 export async function sendGithub(host: Pick<SourceContext, 'commands'>, message: OutboundMessage, gateway?: GithubGateway): Promise<'sent' | 'gone'> {
-  const { commands } = host
-  const { repository, github } = commands.deployment
+  // The reply goes to the repository of the GitHub instance whose Thread it answers.
+  const repository = repositoryOf(host.commands.deployment, message.channel.source)
+  if (repository === undefined) throw new Error(`GitHub instance ${message.channel.source} has no repository that setup verified`)
+  const commands = scopedTo(host.commands, repository)
+  const { github } = commands.deployment
   const number = Number(message.channel.address.number)
   if (!number) throw new Error('Missing GitHub reply target')
   try {

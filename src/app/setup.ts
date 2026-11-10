@@ -13,8 +13,12 @@ export interface SetupHost {
   restart(): void
 }
 
+/** The enabled extra GitHub instances (`github-<n>`) and their repositories, which setup verifies along with the default one. */
+export const githubExtras = (settings: Settings): { id: string; repository: string }[] => Object.entries(settings.sources)
+  .filter(([id, stored]) => id !== 'github' && stored.kind === 'github' && stored.enabled)
+  .map(([id, stored]) => ({ id, repository: typeof stored.config.repository === 'string' ? stored.config.repository.trim() : '' }))
 const setupFields = (settings: Settings) =>
-  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
+  JSON.stringify([Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')), githubExtras(settings)])
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
 
 /**
@@ -60,6 +64,19 @@ export class Setup {
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
     const { machine } = this.host
+    const extra = block.startsWith('source:') && settings.sources[block.slice(7)]?.kind === 'github'
+    if (block === 'instances:github' || extra) {
+      // Each added or changed repository must be one the agent account can push to; the default instance's own check is its block's.
+      const extras = githubExtras(settings)
+      const resolved = await resolveDeployment(machine, settings.sources.github?.config, this.probe(), undefined, extras)
+        .catch((error: unknown) => { if (error instanceof SetupError) return undefined; throw error })
+      const problems = Object.entries(resolved?.repositoryProblems ?? {})
+      if (problems.length) {
+        const named = new Map(extras.map(extra => [extra.id, extra.repository]))
+        throw new UserError('repositoriesRefused', { problems: problems.map(([id, problem]) => `${named.get(id) || id}: ${problem}`).join('; ') })
+      }
+      return
+    }
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
       : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
@@ -76,7 +93,8 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe, undefined, githubExtras(settings))
+    for (const [id, problem] of Object.entries(deployment.repositoryProblems ?? {})) context.logger.warn('dsh-superagent leaves GitHub instance %s out: %s', id, problem)
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem

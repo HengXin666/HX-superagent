@@ -31,11 +31,19 @@ export function settingsView(store: Store, sources: SourceRegistry, health: Heal
       const kind = sources.kind(instance.kind)
       const problem = problemOf(instance.id, setup)
       const { id, title } = sourceHealth(sources, instance, health)
-      return { id, kind: instance.kind, title, description: kind?.description ?? { zh: '', en: '' }, installed: instance.installed,
+      const extra = !!kind?.multiple && id !== kind.kind
+      const fields = (kind?.fields ?? []).filter(field => !extra || !kind!.multiple!.shared.includes(field.key))
+      return { id, kind: instance.kind, title, extra, description: kind?.description ?? { zh: '', en: '' }, installed: instance.installed,
         value: { enabled: instance.enabled, config: instance.config }, revision: store.blockRevision(`source:${instance.id}`),
-        restarts: SETUP_FIELDS[instance.id] ?? [], fields: kind?.fields ?? [], facts: kind?.facts?.(setup.deployment) ?? {},
+        restarts: (SETUP_FIELDS[extra ? instance.kind : instance.id]?.filter(key => !extra || !kind!.multiple!.shared.includes(key)) ?? []) as readonly string[],
+        fields, facts: kind?.facts?.(setup.deployment, id) ?? {},
         labels: store.get(KV.sources.labels(instance.id)) ?? {}, ...problem ? { problem } : {}, ...policyOf(sources, instance.id, health) }
     }),
+    /** Per multi-instance kind: the block revision `saveInstances` names, the most instances, and the fields an extra instance keeps. */
+    instances: Object.fromEntries(sources.multipleKinds().map(kind => {
+      const multiple = sources.kind(kind)!.multiple!
+      return [kind, { revision: store.blockRevision(`instances:${kind}`), max: multiple.max, shared: [...multiple.shared] }]
+    })),
     environment: { root: executionRoot(settings, stateDir), variables: declaredVariables(sources, settings) },
   }
 }

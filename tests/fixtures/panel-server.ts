@@ -125,8 +125,24 @@ function healthOf(name: string): Health {
     detail: 'socket closed' }
 }
 const problemOf_ = (id: string) => [server.setup.problem, server.setup.feishuProblem].find(item => item?.place === id) ?? undefined
+/** Extra GitHub instances stored in the fake settings, one per repository, in creation order. */
+const extras = () => Object.entries(server.settings.sources).filter(([id, stored]) => id !== 'github' && stored.kind === 'github')
+  .sort(([a], [b]) => Number(a.split('-')[1]) - Number(b.split('-')[1]))
+const SHARED_GITHUB = ['cli', 'pollSeconds', 'failuresBeforeError']
+function extraSettings(): SourceView[] {
+  const github = KINDS.find(kind => kind.kind === 'github')!
+  return extras().map(([id, stored]) => {
+    const config = github.schema.parse(stored.config)
+    const { admission: _admission, ...part } = server.settings.policy.sources[id] ?? { allowed: [], admission: {} }
+    void part
+    return { id, kind: 'github', title: { zh: `GitHub · ${String(config.repository)}`, en: `GitHub · ${String(config.repository)}` }, extra: true,
+      description: github.description, installed: true, value: { enabled: stored.enabled, config }, revision: server.revisions[`source:${id}`] ?? 0,
+      restarts: ['repository'], fields: github.fields.filter(field => !SHARED_GITHUB.includes(field.key)), facts: {}, labels: {},
+      policy: { fields: github.policy!.fields, explicit: github.policy!.explicit, rows: github.policy!.rows!(config) } }
+  })
+}
 function sourceSettings(): SourceView[] {
-  return KINDS.map(kind => {
+  return [...KINDS.map(kind => {
     const config = kind.schema.parse(server.settings.sources[kind.kind]?.config ?? {})
     const problem = problemOf_(kind.kind)
     const { admission: _admission, ...part } = server.settings.policy.sources[kind.kind] ?? { allowed: [], admission: {} }
@@ -134,13 +150,13 @@ function sourceSettings(): SourceView[] {
       health: server.health[`sync:${kind.kind}`] }
     const policy = kind.policy && { fields: kind.policy.fields, explicit: kind.policy.explicit, ...kind.policy.rows
       ? { rows: kind.policy.rows(config) } : {}, ...sync ? { sync } : {} }
-    return { id: kind.kind, kind: kind.kind, title: kind.title, description: kind.description, installed: true,
+    return { id: kind.kind, kind: kind.kind, title: kind.title, extra: false, description: kind.description, installed: true,
       value: { enabled: server.settings.sources[kind.kind]?.enabled ?? true, config },
         revision: server.revisions[`source:${kind.kind}`] ?? 0,
       restarts: SETUP_FIELDS[kind.kind] ?? [], fields: kind.fields, facts: kind.facts?.(resolved()) ?? {},
       labels: kind.kind === 'feishu' ? { oc_team: '团队群', oc_other: '另一个群', ...server.joined } : {}, ...problem ? { problem } : {},
       ...policy ? { policy } : {} }
-  })
+  }).flatMap(view => view.id === 'github' ? [view, ...extraSettings()] : [view])]
 }
 function sourceStatuses(): SourceStatusRow[] {
   return KINDS.map(kind => {
@@ -169,6 +185,7 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
     executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
   sources: sourceSettings(),
+  instances: { github: { revision: server.revisions['instances:github'] ?? 0, max: 50, shared: ['cli', 'pollSeconds', 'failuresBeforeError'] } },
   environment: { root: '/srv/dsh-superagent/work', variables: [
     { owner: 'executor', enabled: true, variables: [{ key: 'DSH_SUPERAGENT_DIR', description: { zh: '工单的执行目录',
       en: 'The ticket directory' } },
@@ -343,8 +360,32 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.revisions.pause = (server.revisions.pause ?? 0) + 1
     return { paused: body.paused }
   } },
+  'PUT sources/:kind/instances': { body: true, answer: ({ params: { kind }, body }) => {
+    if (kind !== 'github') return refuse(404, 'Source kind not found')
+    const block = 'instances:github'
+    if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
+    // As on the server, a repository the agent account cannot push to refuses the whole save.
+    const refused = body.rows.find(row => row.config?.repository === 'acme/forbidden')
+    if (refused) return refuse(400, 'The agent account cannot work in these repositories: acme/forbidden: @agent-bot cannot push to acme/forbidden.',
+      { code: 'repositoriesRefused', values: { problems: 'acme/forbidden: @agent-bot cannot push to acme/forbidden.' } })
+    const kept = Object.fromEntries(Object.entries(server.settings.sources).filter(([, stored]) => stored.kind !== 'github'))
+    let number = Math.max(1, ...extras().map(([id]) => Number(id.split('-')[1])))
+    const existing = new Set(extras().map(([id]) => id))
+    const rows = body.rows.map(row => ({ id: row.id && existing.has(row.id) ? row.id : `github-${++number}`, enabled: row.enabled ?? true,
+      config: KINDS.find(item => item.kind === 'github')!.schema.parse(row.config ?? {}) }))
+    const policy = { ...server.settings.policy.sources }
+    for (const [index, row] of body.rows.entries()) {
+      const from = row.policyFrom && !existing.has(rows[index]!.id) ? server.settings.policy.sources[row.policyFrom] : undefined
+      if (from) policy[rows[index]!.id] = structuredClone(from)
+    }
+    server.settings = { ...server.settings, policy: { ...server.settings.policy, sources: policy },
+      sources: { ...kept, ...Object.fromEntries(rows.map(row => [row.id, { enabled: row.enabled, config: row.config, kind: 'github' }])) } }
+    server.revisions[block] = (server.revisions[block] ?? 0) + 1
+    return { restarting: true, revision: server.revisions[block], instances: rows }
+  } },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
-    const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined
+    const extra = extras().find(([id]) => `source:${id}` === block)
+    const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block || (extra && kind.kind === 'github')) : undefined
     if (!['policy', 'eval', 'executor'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
       : refuse(400, 'Invalid settings: block')
     if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
@@ -361,7 +402,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
         return refuse(400, refused.message, { setup: refused.problem })
       }
       restarting = (config.cli ?? '') !== (server.settings.sources[source.kind]?.config.cli ?? '')
-      server.settings = { ...server.settings, sources: { ...server.settings.sources, [source.kind]: { enabled, config } } }
+      const id = extra ? extra[0] : source.kind
+      server.settings = { ...server.settings, sources: { ...server.settings.sources, [id]: { enabled, config, ...extra ? { kind: 'github' } : {} } } }
     }
     server.revisions[block] = (server.revisions[block] ?? 0) + 1
     return { restarting, revision: server.revisions[block] }

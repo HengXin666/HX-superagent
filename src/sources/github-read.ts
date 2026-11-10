@@ -1,7 +1,8 @@
 /** Read-only GitHub repository, conversation, and CI check inspection for assessments and workers. */
 import { z } from 'zod'
 import type { ThreadFact } from '../core/index.ts'
-import { validItems, type Commands, type Tally } from '../infra/commands.ts'
+import { scopedTo, validItems, type Commands, type Tally } from '../infra/commands.ts'
+import { repositoryOf } from '../deployment.ts'
 import { CommentSchema, IssueSchema, isHumanLogin, reviewPlace, type GithubComment } from './github-trigger.ts'
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
@@ -99,13 +100,19 @@ function threadMessages(thread: GithubComment[], id: (comment: GithubComment) =>
  * Reads an Issue or PR, a page of its comments or reviews, a review thread, or a CI snapshot as model-facing
  * `{ id, from, at, text, reply_to?, path?, line?, url }` messages rather than raw GitHub API records.
  */
-export async function readGithub(commands: Commands, resource: string): Promise<unknown> {
+export async function readGithub(unscoped: Commands, resource: string): Promise<unknown> {
+  // `github/…` reads the default instance's repository, `github-<n>/…` that extra instance's.
+  const instance = /^(github(?:-\d+)?)\//.exec(resource)?.[1] ?? 'github'
+  const repository = repositoryOf(unscoped.deployment, instance)
+  if (repository === undefined) throw new Error(`GitHub instance ${instance} has no repository that setup verified`)
+  const commands = scopedTo(unscoped, repository)
+  const rest = resource.slice(instance.length)
   // A commit's CI, such as the default branch's, which no PR names.
-  const commit = /^github\/commits\/([0-9a-f]{7,40})\/checks$/.exec(resource)
+  const commit = /^\/commits\/([0-9a-f]{7,40})\/checks$/.exec(rest)
   if (commit) return pullChecks(commands, commit[1]!)
-  const match = /^github\/(issues|pulls)\/([1-9]\d*)(?:\/(comments|reviews|checks|thread)(?:\/([1-9]\d*))?)?$/.exec(resource)
+  const match = /^\/(issues|pulls)\/([1-9]\d*)(?:\/(comments|reviews|checks|thread)(?:\/([1-9]\d*))?)?$/.exec(rest)
   if (!match) {
-    throw new Error('Use github/issues/<number>, github/pulls/<number>, or append /comments/<page>, /reviews/<page>, /thread/<comment-id> or /checks; or github/commits/<sha>/checks')
+    throw new Error('Use github/issues/<number>, github/pulls/<number>, or append /comments/<page>, /reviews/<page>, /thread/<comment-id> or /checks; or github/commits/<sha>/checks (github-<n>/… for another repository\'s instance)')
   }
   const [, kind, number, section, page = '1'] = match
   if (kind === 'issues' && (section === 'reviews' || section === 'checks' || section === 'thread')) {
@@ -118,7 +125,7 @@ export async function readGithub(commands: Commands, resource: string): Promise<
     return pullChecks(commands, pr.head.sha)
   }
   if (section === 'thread') {
-    if (!match[4]) throw new Error('Name the review thread by one of its comments: github/pulls/<number>/thread/<comment-id>')
+    if (!match[4]) throw new Error(`Name the review thread by one of its comments: ${instance}/pulls/<number>/thread/<comment-id>`)
     const thread = await reviewThread(commands, Number(number), Number(match[4]))
     if (!thread.length) throw new Error('No review comment of this PR has that id')
     return { messages: threadMessages(thread, item => String(item.id)) }
@@ -137,7 +144,7 @@ export async function readGithub(commands: Commands, resource: string): Promise<
     ? githubMessage({ ...item, created_at: item.submitted_at ?? item.created_at }, reviewText(item), String(item.id))
     : { ...githubMessage(item, item.body ?? '', String(item.id)), ...item.in_reply_to_id ? { reply_to: String(item.in_reply_to_id) } : {} })
   return { messages, ...tally.skipped ? { skipped: tally.skipped } : {},
-    ...listed.length === 20 ? { next_resource: `github/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
+    ...listed.length === 20 ? { next_resource: `${instance}/${kind}/${number}/${section}/${Number(page) + 1}` } : {} }
 }
 /** Reads one page of an Issue or PR conversation (with the Issue/PR description first on page 1), using comment URLs as message IDs. */
 async function conversationPage(commands: Commands, number: number, page: number) {
@@ -158,7 +165,10 @@ async function conversationPage(commands: Commands, number: number, page: number
  */
 export const githubThreadContext: ThreadContext<unknown> = {
   messageId: trigger => trigger.url ?? '',
-  read: async (commands, trigger, part, cursor) => {
+  read: async (unscoped, trigger, part, cursor) => {
+    // An extra instance's Trigger reads its own repository.
+    const repository = repositoryOf(unscoped.deployment, trigger.source)
+    const commands = repository === undefined ? unscoped : scopedTo(unscoped, repository)
     // The default branch's CI has no conversation; its Trigger is its context.
     if (typeof trigger.meta.branch === 'string') {
       const message = { id: trigger.url ?? trigger.id, from: 'CI', at: trigger.at, text: trigger.text, bot: true as const }

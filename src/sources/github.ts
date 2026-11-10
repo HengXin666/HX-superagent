@@ -11,8 +11,11 @@ import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubGateway } from './github-gateway.ts'
 import type { HxRouterConfig } from './hxrouter-loops.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
-import { observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
-import { health, sourceContext, type Health, type SourceContext } from './host.ts'
+import { instanceId, observePull, pullsOf, readPull, type Pull } from './github-pull.ts'
+import { health, sourceContext, type Health, type SourceContext, type SourceHost } from './host.ts'
+import type { SourceRegistry } from './registry.ts'
+import type { HealthEntry } from '../infra/health.ts'
+import { githubInstances, repositoryOf } from '../deployment.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -27,7 +30,9 @@ const NotificationSchema = z.looseObject({
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
-  observeCi: z.boolean().default(false) }).strict()
+  observeCi: z.boolean().default(false),
+  /** The HX-Email gateway's `github_user` instance that posts this repository's replies; 0 posts them with the agent's own gh. */
+  gatewayInstance: z.number().int().min(0).default(0) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
 const OBSERVED = { issues: 'observeIssues', pulls: 'observePulls', comments: 'observeComments', ci: 'observeCi' } as const
 type Scope = keyof typeof OBSERVED
@@ -37,16 +42,25 @@ function scopeOf(meta: Record<string, unknown>): Scope | undefined {
   if (meta.kind === 'pull') return 'pulls'
   return meta.kind === 'conversation' || meta.kind === 'inline' || meta.kind === 'review' ? 'comments' : undefined
 }
+/** Fields of the agent account, shared by every GitHub instance and kept on the default one. */
+const SHARED = ['cli', 'pollSeconds', 'failuresBeforeError'] as const
+/** One GitHub instance per repository: the most an installation runs, the default one included. */
+export const MAX_REPOSITORIES = 50
+/** Repositories whose rounds fit one minute; more of them lengthen the interval so the account stays within GitHub's hourly limit. */
+const REPOSITORIES_PER_MINUTE = 15
 export const githubKind: SourceKind<GithubConfig> = {
   kind: SOURCE,
+  multiple: { max: MAX_REPOSITORIES, shared: SHARED, label: config => config.repository },
   title: { zh: 'GitHub', en: 'GitHub' },
   description: { zh: '智能体的 GitHub 账号；接收仓库里发给它的通知、已订阅 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'The agent\'s GitHub accounts; receives notifications to it in the repository, discussion on subscribed Issues and PRs, CI changes, and PR merge or close.' },
   schema: GithubConfigSchema,
   fields: [
     { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
-      hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent.' } },
+      hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。更多仓库在下面的仓库表里加，每个仓库是一个实例，有自己的允许名单、接收表和工单。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent. Add more repositories in the repository table below: each is an instance with its own allowed accounts, admission table and tickets.' } },
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
+    { key: 'gatewayInstance', type: 'number', advanced: true, min: 0, max: 1000000, label: { zh: '网关 github_user 实例', en: 'Gateway github_user instance' },
+      hint: { zh: '这个仓库的回复由 HX-Email 网关的这个 github_user 实例发出（实例必须登录智能体账号、配置这个仓库，HX-Email 来源要开着）；0 由智能体自己的 gh 发。默认实例填 0 时沿用 HX-Email 来源上的 GitHub 实例。', en: 'This repository\'s replies are posted by this github_user instance of the HX-Email gateway (signed in to the agent account, serving this repository, with the HX-Email Source on); 0 posts them with the agent\'s own gh. On the default instance, 0 keeps the GitHub instance set on the HX-Email Source.' } },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' }, hint: { zh: 'GitHub 要求更长间隔时以 GitHub 为准。', en: 'A longer interval requested by GitHub wins.' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' }, hint: { zh: '单次网络中断会在下一次轮询时自动重试，不必报告。', en: 'A single network interruption is retried on the next poll and need not be reported.' } },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收仓库里的新 Issue', en: 'Receive new Issues in the repository' },
@@ -94,20 +108,61 @@ export const githubKind: SourceKind<GithubConfig> = {
   environment: {
     variables: [
       { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', description: { zh: '这个来源监听的仓库，owner/name。智能体在这里开的 PR，分支最后一段是 DSH_SUPERAGENT_NAME 时（例如 agent/$DSH_SUPERAGENT_NAME）会关联到工单', en: 'The repository this Source watches, as owner/name. A PR the agent opens here from a branch whose last path segment is DSH_SUPERAGENT_NAME (for example agent/$DSH_SUPERAGENT_NAME) binds to the ticket' } },
+      { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORIES', description: { zh: '这个安装监听的全部仓库，空格分隔，第一个是默认仓库。在其中别的仓库开的 PR，分支同样以 DSH_SUPERAGENT_NAME 结尾时也会关联到工单', en: 'Every repository this installation watches, space-separated, the default one first. A PR opened in another of them from a branch that also ends in DSH_SUPERAGENT_NAME binds to the ticket too' } },
       { key: 'DSH_SUPERAGENT_GITHUB_ACCOUNT', description: { zh: '智能体的 GitHub 账号；gh 以它登录，除自动合并外的 GitHub 操作都用 gh，不用其他账号或凭据', en: 'The agent\'s GitHub account. gh is signed in to it; use gh for every GitHub operation except auto-merge, and never another account or credential' } },
       { key: 'DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL', description: { zh: '智能体账号的提交邮箱。这里的 git 没有身份：按提示词写明的作者提交，没有写明时用智能体账号和这个邮箱', en: 'Commit email of the agent\'s account. git has no identity here: commit as the author these instructions name, or as the agent\'s account with this email when they name none' } },
       { key: 'DSH_SUPERAGENT_GITHUB_NUMBER', description: { zh: '接下工单的 Issue 或 PR 编号；工单不是从 GitHub 来的时为空', en: 'Number of the Issue or PR that started the ticket; empty when the ticket did not start on GitHub' } },
       { key: 'DSH_SUPERAGENT_GITHUB_PR_HEAD', description: { zh: '接下工单的 PR 的 head 引用 refs/pull/<编号>/head；不是 PR 时为空', en: 'Head ref refs/pull/<number>/head of the PR that started the ticket; empty when it was not a PR' } },
     ],
     values: ({ deployment, trigger }) => {
-      const number = trigger?.threads[0]?.source === SOURCE ? Number(trigger.meta.number) || 0 : 0
-      return { DSH_SUPERAGENT_GITHUB_REPOSITORY: deployment.repository, DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login, DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
+      // A ticket from an extra instance works in that instance's repository; one from elsewhere (such as a chat) in the default one.
+      const from = trigger?.threads[0]?.source
+      const repository = (from !== undefined ? repositoryOf(deployment, from) : undefined)
+      const number = repository !== undefined ? Number(trigger?.meta.number) || 0 : 0
+      return { DSH_SUPERAGENT_GITHUB_REPOSITORY: repository ?? deployment.repository,
+        DSH_SUPERAGENT_GITHUB_REPOSITORIES: githubInstances(deployment).map(([, name]) => name).join(' '), DSH_SUPERAGENT_GITHUB_ACCOUNT: deployment.github.login, DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL: deployment.github.noreply, DSH_SUPERAGENT_GITHUB_NUMBER: number ? String(number) : '',
         DSH_SUPERAGENT_GITHUB_PR_HEAD: number && trigger?.meta.isPr === true ? `refs/pull/${number}/head` : '' }
     },
   },
-  facts: (deployment): Record<string, Localized | string> => deployment ? {
-    cli: { zh: `当前账号 @${deployment.github.login}`, en: `Current account @${deployment.github.login}` },
-  } : {},
+  facts: (deployment, id = SOURCE): Record<string, Localized | string> => {
+    if (!deployment) return {}
+    if (id === SOURCE) return { cli: { zh: `当前账号 @${deployment.github.login}`, en: `Current account @${deployment.github.login}` } }
+    const repository = repositoryOf(deployment, id)
+    return repository ? { repository: { zh: `@${deployment.github.login} 可以推送到 ${repository}`, en: `@${deployment.github.login} can push to ${repository}` } } : {}
+  },
+}
+/** The resource prefix of GitHub instance reads: `github/…` for the default instance, `<id>/…` (such as `github-2/…`) for another. */
+export const resourcePrefix = (ctx: Pick<SourceContext, 'instance'>): string => instanceId(ctx)
+/** Rewrites a state key of extra instance `id` into its own namespace; the default instance keeps the historical keys. */
+const own = (id: string, name: string): string => id === SOURCE ? name : `${id}/${name}`
+/**
+ * The context of GitHub instance `id` on `repository`, made from the default instance's: its Triggers, Threads and state are its own,
+ * its GitHub calls go to its repository, and its health reports to `health` (its `github@<id>` entry).
+ */
+export function instanceContext(base: SourceContext, id: string, repository: string, health: Map<string, HealthEntry>): SourceContext {
+  if (id === SOURCE) return base
+  return {
+    ...base,
+    instance: id,
+    get deployment() { return { ...base.deployment, repository } },
+    get commands() { return base.commands.forRepository(repository) },
+    get problem() { return undefined },
+    config: <C extends Record<string, unknown>>(kind: string) => base.config<C>(kind === SOURCE ? id : kind),
+    state: {
+      get: name => base.state.get(own(id, name) as typeof name),
+      set: (name, value) => { base.state.set(own(id, name) as typeof name, value) },
+      keys: family => base.state.keys({ ...family, prefix: own(id, family.prefix) } as typeof family)
+        .map(name => name.slice(id.length + 1) as typeof name),
+    },
+    report: (entry, value) => {
+      if (entry !== 'github') throw new Error(`The GitHub Source has no health entry ${entry}`)
+      health.get(`github@${id}`)?.set(value)
+    },
+  }
+}
+/** The contexts of every GitHub instance setup verified, the default one first. */
+export function instanceContexts(host: SourceHost, base: SourceContext): SourceContext[] {
+  return githubInstances(base.deployment).map(([id, repository]) => instanceContext(base, id, repository, host.sources.instanceHealth(id)))
 }
 export const name = 'dsh-superagent-github'
 export const inject = ['orchestrator']
@@ -115,23 +170,30 @@ export const inject = ['orchestrator']
  * The GitHub Source kind whose replies go through `gateway()` when it names one: the HX-Email gateway's `github_user` instance set on
  * the enabled HX-Email Source. Inbound stays here either way, so a Thread keeps one Ticket.
  */
-export function githubKindWith(gateway: () => GithubGateway | undefined): SourceKind<GithubConfig> {
-  return { ...githubKind, channel: { link: githubLink, send: (host, message) => sendGithub(host, message, gateway()) } }
+export function githubKindWith(gateway: (source: string) => GithubGateway | undefined): SourceKind<GithubConfig> {
+  return { ...githubKind, channel: { link: githubLink, send: (host, message) => sendGithub(host, message, gateway(message.channel.source)) } }
 }
-/** The `github_user` instance the enabled HX-Email Source names for GitHub replies, with its gateway connection. */
-export function configuredGateway(instance: { enabled: boolean; config: HxRouterConfig } | undefined): GithubGateway | undefined {
-  if (!instance?.enabled || !instance.config.githubInstance) return undefined
-  const { baseUrl, tokenEnv, githubInstance } = instance.config
-  return { connection: { baseUrl, tokenEnv }, instance: githubInstance }
+/**
+ * The `github_user` instance that posts a GitHub instance's replies, with the enabled HX-Email Source's gateway connection: the
+ * instance's own `gatewayInstance`, or for the default instance the one set on the HX-Email Source.
+ */
+export function configuredGateway(instance: { enabled: boolean; config: HxRouterConfig } | undefined, own = 0, primary = true): GithubGateway | undefined {
+  if (!instance?.enabled) return undefined
+  const number = own || (primary ? instance.config.githubInstance : 0)
+  if (!number) return undefined
+  const { baseUrl, tokenEnv } = instance.config
+  return { connection: { baseUrl, tokenEnv }, instance: number }
 }
 export function apply(ctx: Context): void {
-  const kind = githubKindWith(() => configuredGateway(ctx.orchestrator.sources.instance<HxRouterConfig>('hxrouter')))
+  const sources = (): SourceRegistry => ctx.orchestrator.sources
+  const kind = githubKindWith(source => configuredGateway(sources().instance<HxRouterConfig>('hxrouter'),
+    sources().instance<GithubConfig>(source)?.config.gatewayInstance ?? 0, source === SOURCE))
   ctx.effect(() => ctx.orchestrator.sources.register(kind), 'github: source kind')
   ctx.effect(() => {
     const source = sourceContext(ctx.orchestrator, kind)
     const controller = new AbortController()
     // Unhandled rejections terminate the DSH process, so a failure escaping the polling loop is reported as source health instead.
-    const running = watch(source, controller.signal)
+    const running = watch(source, controller.signal, () => instanceContexts(ctx.orchestrator, source))
       .catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
     return async () => { controller.abort(); await running }
   })
@@ -140,24 +202,36 @@ export function apply(ctx: Context): void {
 export function pollFailure(failures: number, threshold: number, error: unknown): Health | undefined {
   return failures >= threshold ? health('error', 'pollFailures', { count: String(failures), error: String(error) }) : undefined
 }
-async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
-  let interval = 60
-  let failures = 0
+/**
+ * Polls every GitHub instance in turn each round; an instance whose round fails reports its own error and the others go on. The
+ * account's interval (`pollSeconds` of the default instance) grows with the number of repositories so their reads stay within
+ * GitHub's hourly limit for the account.
+ */
+async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => SourceContext[] = () => [ctx]): Promise<void> {
+  const failures = new Map<string, number>()
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the accounts; until then nothing is polled.
   if (!ctx.configured()) { ctx.report('github', health('paused', 'setupPending')); return }
   while (!signal.aborted) {
-    const config = ctx.config<GithubConfig>(SOURCE)
-    try {
-      if (config) interval = await pollRound(ctx, signal)
-      else ctx.report('github', health('paused', 'sourceOff'))
-      failures = 0
-    } catch (error) {
-      failures += 1
-      const failed = pollFailure(failures, config?.failuresBeforeError ?? 1, error)
-      if (!signal.aborted && failed) ctx.report('github', failed)
+    const instances = contexts()
+    let interval = 60
+    for (const instance of instances) {
+      if (signal.aborted) break
+      const id = instanceId(instance)
+      const config = instance.config<GithubConfig>(SOURCE)
+      try {
+        if (config) interval = Math.max(interval, await pollRound(instance, signal))
+        else instance.report('github', health('paused', 'sourceOff'))
+        failures.set(id, 0)
+      } catch (error) {
+        const count = (failures.get(id) ?? 0) + 1
+        failures.set(id, count)
+        const failed = pollFailure(count, ctx.config<GithubConfig>(SOURCE)?.failuresBeforeError ?? config?.failuresBeforeError ?? 1, error)
+        if (!signal.aborted && failed) instance.report('github', failed)
+      }
     }
-    await pause(Math.max(interval, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
+    const spread = 60 * Math.ceil(instances.length / REPOSITORIES_PER_MINUTE)
+    await pause(Math.max(interval, spread, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
   }
 }
 interface Round {
@@ -177,7 +251,7 @@ function failed(ctx: SourceContext, round: Round, number: number, error: unknown
   if (deleted(error)) round.dropped.push(number)
   else if (abandoned) round.abandoned.push(number)
   else round.failures.push(`#${number}: ${String(error)}`)
-  ctx.threads.patch(`github:${number}`, { pollError: String(error) })
+  ctx.threads.patch(`${instanceId(ctx)}:${number}`, { pollError: String(error) })
 }
 function included(raw: string): { headers: string; body: string } {
   const split = raw.search(/\r?\n\r?\n/)
@@ -245,7 +319,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
       if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login))
+      await ctx.receive(pr ? pullTrigger(issue.data, login, instanceId(ctx)) : issueTrigger(issue.data, login, instanceId(ctx)))
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
     }
@@ -253,7 +327,7 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
     if (!number || !fresh(item.updated_at ?? item.created_at, 'comments')) continue
     const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
     const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {} }
-    const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login)
+    const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login, instanceId(ctx))
     if (trigger.text) await ctx.receive(trigger)
   }
   const newest = Math.max(...items.map(item => Date.parse(item.updated_at ?? '')).filter(Number.isFinite))
@@ -279,10 +353,10 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
   let revision = previous?.revision ?? 0
   if (known && JSON.stringify(now) !== JSON.stringify(known)) {
     revision += 1
-    const summary = ciSummary(snapshot, branch, `github/commits/${head.sha}/checks`)
+    const summary = ciSummary(snapshot, branch, `${resourcePrefix(ctx)}/commits/${head.sha}/checks`)
     const url = `https://github.com/${ctx.deployment.repository}/commit/${head.sha}`
-    await ctx.receive(branchCiTrigger(branch, head.sha, revision, summary, url))
-    ctx.threads.describe(`github:ci:${branch}`, { label: `CI on ${branch}`, facts: { ci: ciFact(counts) } })
+    await ctx.receive(branchCiTrigger(branch, head.sha, revision, summary, url, instanceId(ctx)))
+    ctx.threads.describe(`${instanceId(ctx)}:ci:${branch}`, { label: `CI on ${branch}`, facts: { ci: ciFact(counts) } })
   }
   ctx.state.set(KV.github.branchCi, { branch, failures: now, revision })
 }
@@ -369,7 +443,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
       // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
       const { login } = ctx.deployment.github
       const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
-      if (opened) await ctx.receive(issueTrigger(issue, login))
+      if (opened) await ctx.receive(issueTrigger(issue, login, instanceId(ctx)))
       await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
       nameThread(ctx, number, issue.title)
     }
@@ -380,13 +454,13 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     const { login } = ctx.deployment.github
     if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
-      await ctx.receive(pullTrigger(opened, login))
+      await ctx.receive(pullTrigger(opened, login, instanceId(ctx)))
     }
     await intakeComments(ctx, { number, isPr: true, url: pr.html_url, prAuthor: pr.user.login }, since, round)
     if (pr.title) nameThread(ctx, number, pr.title)
   }
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
-  ctx.threads.patch(`github:${number}`, { pollError: undefined })
+  ctx.threads.patch(`${instanceId(ctx)}:${number}`, { pollError: undefined })
 }
 /** Reads and observes a PR at most once per polling round. */
 function pull(ctx: SourceContext, round: Round, number: number): Promise<Pull> {
@@ -412,13 +486,13 @@ async function intakeComments(ctx: SourceContext, ref: PullRef, since: string, r
       if (!Number.isFinite(timestamp) || timestamp < Date.parse(since)) continue
       if (sameName(comment.user.login, login)) continue
       // A review decision without a body still reaches the ticket: a worker may be waiting for that approval.
-      const trigger = commentTrigger(comment, ref, kind, login)
+      const trigger = commentTrigger(comment, ref, kind, login, instanceId(ctx))
       if (trigger.text) await ctx.receive(trigger)
     }
   }
 }
 export async function pollTicketPulls(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
-  const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true)))]
+  const numbers = [...new Set(ctx.tickets.open().flatMap(ticket => pullsOf(ticket, true, instanceId(ctx))))]
   for (const number of numbers) {
     if (stopped(ctx, round)) return
     try {
@@ -434,17 +508,17 @@ async function pollChecks(ctx: SourceContext, round: Round, number: number, pr: 
   const previous = ctx.state.get(KV.github.ci(number))
   if (previous?.fingerprint === fingerprint) return
   const revision = previous ? previous.revision + 1 : 0
-  if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`, `github/pulls/${number}/checks`)))
+  if (previous) await ctx.receive(ciTrigger(pr, revision, ciSummary(snapshot, `PR #${number}`, `${resourcePrefix(ctx)}/pulls/${number}/checks`), instanceId(ctx)))
   ctx.state.set(KV.github.ci(number), { fingerprint, revision })
-  ctx.threads.describe(`github:${number}`, { facts: { ci: ciFact(ciCounts(snapshot)) } })
+  ctx.threads.describe(`${instanceId(ctx)}:${number}`, { facts: { ci: ciFact(ciCounts(snapshot)) } })
 }
 function nameThread(ctx: SourceContext, number: number, title: string): void {
-  ctx.threads.patch(`github:${number}`, { title })
-  ctx.threads.describe(`github:${number}`, { label: `#${number} ${title}`, facts: { number: { value: `#${number}` } } })
+  ctx.threads.patch(`${instanceId(ctx)}:${number}`, { title })
+  ctx.threads.describe(`${instanceId(ctx)}:${number}`, { label: `#${number} ${title}`, facts: { number: { value: `#${number}` } } })
 }
 /** Polls subscribed Issue and PR Threads not already read in this round; a deleted (410) Issue is still polled within the horizon (costing one read) and does not fail the round. */
 export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, round = newRound(signal)): Promise<void> {
-  await pollEach(ctx, SOURCE, () => stopped(ctx, round), async thread => {
+  await pollEach(ctx, instanceId(ctx), () => stopped(ctx, round), async thread => {
     try { await pollThread(ctx, round, thread) }
     catch (error) {
       if (stopped(ctx, round)) throw error

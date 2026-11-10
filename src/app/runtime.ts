@@ -17,7 +17,7 @@ import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, ty
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
-import type { Deployment, Machine } from '../deployment.ts'
+import { instanceOf, repositoryOf, type Deployment, type Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
@@ -34,6 +34,7 @@ import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
+import { instanceContext } from '../sources/github.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -150,7 +151,8 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            const { deployment } = setup
+            for (const message of pullEndNotices(ended, request, source => repositoryOf(deployment, source))) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
@@ -163,6 +165,7 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
+        githubFor: (ticket, repository) => runtime.githubFor(ticket, repository),
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -176,6 +179,19 @@ export class Runtime extends Service implements SourceHost {
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
   context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  /**
+   * The context of the GitHub instance whose repository is `repository`, or without one the ticket's home instance: the instance its
+   * source Trigger came from, else the default one. Undefined when no instance setup verified watches `repository`.
+   */
+  githubFor(ticket: Ticket, repository?: string): SourceContext | undefined {
+    const base = this.context({ kind: 'github', health: ['github'] })
+    const deployment = this.setup.deployment
+    const home = this.store.triggers.get(ticket.origin.triggerId)?.source
+    const id = repository !== undefined ? instanceOf(deployment, repository)
+      : home !== undefined && repositoryOf(deployment, home) !== undefined ? home : 'github'
+    const name = id === undefined ? undefined : repositoryOf(deployment, id)
+    return id === undefined || name === undefined ? undefined : instanceContext(base, id, name, this.sources.instanceHealth(id))
+  }
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
@@ -184,7 +200,8 @@ export class Runtime extends Service implements SourceHost {
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links = resolved ? { repository: resolved.repository, ...resolved.repositories ? { repositories: resolved.repositories } : {},
+      ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {

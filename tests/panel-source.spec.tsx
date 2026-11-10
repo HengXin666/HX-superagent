@@ -64,7 +64,7 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   const cards = all('.dt-card')
-  expect(cards.map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['飞书', 'GitHub'])
+  expect(cards.map(card => card.querySelector('.dt-row-title')?.firstChild?.textContent)).toEqual(['飞书', 'GitHub', 'GitHub 仓库'])
   const feishu = cards[0]!
   expect(feishu.textContent).toContain('接收的群')
   await click([...feishu.querySelectorAll('button')].find(button => button.textContent === '添加')!)
@@ -107,7 +107,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   await click(zh.discard)
   expect(github.textContent).toContain('当前账号 @agent-bot')
   await click([...github.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes('高级'))!)
-  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '轮询间隔 / 秒', '连续失败几次后报告异常'])
+  expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI', '网关 github_user 实例', '轮询间隔 / 秒', '连续失败几次后报告异常'])
   expect(all('.dt-card')[0]!.textContent).toContain('当前机器人 Widgets Bot')
   await type(field<HTMLInputElement>('智能体的 GitHub CLI'), '/opt/bin/gh-agent')
   expect(github.textContent).toContain('保存会重启 dsh-superagent：2 个进行中的派工会中断，并带恢复说明重新开始。')
@@ -283,4 +283,32 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
   expect(server.requests.filter(request => request.path === 'settings').length).toBeGreaterThan(reads)
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(false)
   expect(field<HTMLInputElement>('智能体的 GitHub CLI').value).toBe('/opt/bin/gh-agent')
+})
+
+it('adds repositories to the GitHub Source in bulk, saves them as instances, and removes one', async () => {
+  await mount()
+  await click(zh['tab.source'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const table = () => document.getElementById('dt-source-github-repositories')!
+  expect(table().textContent).toContain(zh.repositoriesTitle)
+  const bulk = table().querySelector<HTMLTextAreaElement>('textarea')!
+  await type(bulk, 'acme/gadgets\nhttps://github.com/acme/tools/pull/3 nope acme/widgets')
+  await click([...table().querySelectorAll('button')].find(item => item.textContent === zh.repositoriesBulkAdd)!)
+  // The default repository and unreadable entries stay out of the table.
+  expect([...table().querySelectorAll<HTMLInputElement>('input.dt-mono, .dt-mono input')].map(input => input.value)).toEqual(['acme/gadgets', 'acme/tools'])
+  expect(table().textContent).toContain('读不出仓库：nope')
+  await click([...table().querySelectorAll('button')].find(item => item.textContent === zh.repositoriesSave)!)
+  const saved = server.requests.find(request => request.path === 'sources/github/instances')
+  expect(saved).toMatchObject({ method: 'PUT', body: { revision: 0, rows: [{ enabled: true, config: { repository: 'acme/gadgets' }, policyFrom: 'github' },
+    { enabled: true, config: { repository: 'acme/tools' }, policyFrom: 'github' }] } })
+  expect(server.settings.sources['github-2']).toMatchObject({ kind: 'github', config: { repository: 'acme/gadgets' } })
+  // Each repository has its own card, titled by its repository and without the account's fields.
+  const card = document.getElementById('dt-source-github-2')!
+  expect(card.textContent).toContain('GitHub · acme/gadgets')
+  expect(card.textContent).not.toContain('智能体的 GitHub CLI')
+  const remove = [...table().querySelectorAll('button')].find(item => item.getAttribute('aria-label') === '移除：acme/tools')!
+  await click(remove)
+  await click([...table().querySelectorAll('button')].find(item => item.textContent === zh.repositoriesSave)!)
+  expect(server.settings.sources['github-3']).toBeUndefined()
+  expect(server.settings.sources['github-2']).toBeDefined()
 })

@@ -51,7 +51,12 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
 export interface Deployment extends Machine {
+  /** Canonical repository of the default GitHub instance (`github`). */
   repository: string
+  /** Canonical repository of each extra GitHub instance (such as `github-2`) whose push access setup verified. */
+  repositories?: Record<string, string>
+  /** Why setup left an extra GitHub instance out, by instance ID; the other instances run. */
+  repositoryProblems?: Record<string, string>
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
@@ -83,8 +88,35 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/** The repository of GitHub instance `id` (`github` or an extra instance setup verified), or undefined. */
+export const repositoryOf = (deployment: Pick<Deployment, 'repository' | 'repositories'>, id: string): string | undefined =>
+  id === 'github' ? deployment.repository : deployment.repositories?.[id]
+/** The GitHub instance whose repository is `repository` (case-insensitive), or undefined. */
+export function instanceOf(deployment: Pick<Deployment, 'repository' | 'repositories'>, repository: string): string | undefined {
+  const same = (name: string) => name.toLowerCase() === repository.toLowerCase()
+  if (same(deployment.repository)) return 'github'
+  return Object.entries(deployment.repositories ?? {}).find(([, name]) => same(name))?.[0]
+}
+/** Every GitHub instance ID with its repository, the default instance first. */
+export const githubInstances = (deployment: Pick<Deployment, 'repository' | 'repositories'>): [id: string, repository: string][] =>
+  [['github', deployment.repository], ...Object.entries(deployment.repositories ?? {})]
+/** Checks the agent account's push access to one repository and returns its canonical name. */
+async function repositoryAccess(cli: string, login: string, remote: string, probe: Probe): Promise<string> {
+  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
+  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+    throw new SetupError('repositoryUnreadable', { account: login, repository: remote, output: reason(error) })
+  }))
+  if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
+  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: login, repository: access.name })
+  return access.name
+}
+/**
+ * Verify the agent's GitHub CLI identity and push access to the configured repository, and to the repository of each extra GitHub
+ * instance in `extras`. An extra repository that fails its check is left out with its reason in `repositoryProblems`, so one
+ * unreachable repository does not stop the others; one that repeats another instance's repository is left out the same way.
+ */
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? '',
+  extras: readonly { id: string; repository: string }[] = []): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
@@ -95,14 +127,23 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
-  // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
-    throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
-  }))
-  if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
-  const repository = access.name
-  if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  const repository = await repositoryAccess(cli, agent.login, remote, probe)
+  const repositories: Record<string, string> = {}, repositoryProblems: Record<string, string> = {}
+  const taken = new Set([repository.toLowerCase()])
+  for (const extra of extras) {
+    if (!extra.repository) { repositoryProblems[extra.id] = 'The instance names no repository.'; continue }
+    try {
+      const name = await repositoryAccess(cli, agent.login, extra.repository, probe)
+      if (taken.has(name.toLowerCase())) { repositoryProblems[extra.id] = `${name} is already another GitHub instance's repository.`; continue }
+      taken.add(name.toLowerCase())
+      repositories[extra.id] = name
+    } catch (error) {
+      if (!(error instanceof SetupError)) throw error
+      repositoryProblems[extra.id] = error.message
+    }
+  }
+  return { ...machine, repository, ...extras.length ? { repositories, repositoryProblems } : {},
+    github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

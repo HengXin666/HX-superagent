@@ -52,6 +52,9 @@ function membership(error: unknown): unknown {
   const hint = 'The Feishu bot is not a member of the chat. Add the bot in the chat settings, then retry.'
   return new CliError(hint, error.code, error.exitCode)
 }
+/** `commands` with GitHub calls going to `repository`; commands already going there are returned as they are. */
+export const scopedTo = (commands: Commands, repository: string): Commands =>
+  (commands.repository ?? commands.deployment.repository) === repository ? commands : commands.forRepository(repository)
 /**
  * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
  * Restricts GitHub API calls to the configured repository and translates CLI failures into CliError instances for Sources, MasterAssessor, Outbox, and Settings.
@@ -61,10 +64,16 @@ export class Commands {
    * @param resolved - returns the resolved deployment setup, or throws while setup is still pending.
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
    */
-  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
+  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal,
+    private readonly scoped?: string) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string { return this.deployment.repository }
-  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
+  /** The repository GitHub calls go to: the default GitHub instance's, or the one `forRepository` named. */
+  get repository(): string { return this.scoped ?? this.deployment.repository }
+  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal]), this.scoped) : this }
+  /** The same commands with GitHub calls restricted to `repository`, one of the deployment's GitHub instances. */
+  forRepository(repository: string): Commands {
+    return repository === this.repository ? this : new Commands(this.resolved, this.environment, this.signal, repository)
+  }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,

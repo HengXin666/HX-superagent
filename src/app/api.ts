@@ -3,6 +3,7 @@ import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
 import type { HistoryView } from './settings-history.ts'
+import type { InstanceRowInput } from './settings.ts'
 import type { OverviewView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
@@ -36,6 +37,8 @@ export interface Api {
   'POST tickets/:id/stop': { response: { stopped: true } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
+  /** Replaces the extra instances of a multi-instance Source kind (one GitHub instance per repository); rows without `id` add instances. */
+  'PUT sources/:kind/instances': { body: { rows: InstanceRowInput[]; revision: number }; response: { revision: number; restarting: boolean; instances: { id: string; enabled: boolean; config: Record<string, unknown> }[] } }
   'GET policy/history': { response: HistoryView }
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }

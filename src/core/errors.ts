@@ -42,6 +42,12 @@ export const USER_ERRORS = {
   promptPlaceholders: ['refused', 'The “{part}” template must keep {placeholders}, which the system fills in'],
   promptPartEmpty: ['refused', 'The “{part}” part cannot be empty; reset it to follow its built-in text'],
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
+  notMultiple: ['refused', 'The {source} Source kind has a single instance'],
+  instancesTooMany: ['refused', 'At most {max} {source} instances fit one installation'],
+  instanceInvalid: ['refused', 'Instance {id}: {error}'],
+  instanceDuplicate: ['refused', '{label} is listed more than once'],
+  instanceInUse: ['refused', 'Instance {id} ({label}) still has open tickets: {tickets}. End them before removing it'],
+  repositoriesRefused: ['refused', 'The agent account cannot work in these repositories: {problems}'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>

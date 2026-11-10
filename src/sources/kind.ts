@@ -41,7 +41,8 @@ export interface SourcePolicyPart<P extends Record<string, unknown>> {
 }
 /** UI link for a channel address; `triggerId` names the Trigger whose own deep link is preferred when available. */
 export interface ChannelLink { url: string; label: Localized; triggerId?: string }
-export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>>
+/** Deployment facts a channel link reads; `repositories` maps a GitHub instance to its repository, which `repository` names for one link. */
+export type ChannelLinks = Partial<Pick<Deployment, 'repository' | 'feishu'>> & { repositories?: Record<string, string> }
 /** Outbound messaging adapter for a source kind's threads. */
 export interface SourceChannel<C> {
   /** Whether a reply may still go to `address`; without it, every address may receive replies. */
@@ -85,10 +86,15 @@ export interface TriggerContext {
 export interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>> {
   /** Stable ID; a default instance with the same ID exists when none is stored. */
   kind: string
+  /**
+   * Extra instances besides the default one: each has its own ID (`<kind>-<n>`), configuration, policy part, Threads and health
+   * entries (`<entry>@<id>`). `shared` fields are the account's and live on the default instance only; `label` names an instance.
+   */
+  multiple?: { max: number; shared: readonly string[]; label(config: C): string }
   title: Localized
   description: Localized
   /** Read-only status facts derived from `deployment` (undefined while waiting for setup), keyed by field key. */
-  facts?(deployment: Deployment | undefined): Record<string, Localized | string>
+  facts?(deployment: Deployment | undefined, id?: string): Record<string, Localized | string>
   /** Validates stored and submitted configuration and fills defaults. */
   schema: z.ZodType<C>
   fields: FieldSpec[]

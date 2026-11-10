@@ -24,7 +24,9 @@ export const KV = {
   /** Settings: current revision, per-block revision, and saved settings snapshots (including the current one). */
   settings: { revision: record<number>('settings-revision'),
     block: family<number, [block: SettingsSave]>('settings-block-revision:'),
-    version: family<SettingsVersion, [revision: number]>('settings-version:') },
+    version: family<SettingsVersion, [revision: number]>('settings-version:'),
+    /** The highest extra instance number issued per multi-instance kind, so a removed instance's ID (and its Threads' keys) is never reused. */
+    instanceNumber: family<number, [kind: string]>('settings-instance-number:') },
   /** Prompts: current revision and saved prompt versions. */
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */

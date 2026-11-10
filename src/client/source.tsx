@@ -1,9 +1,10 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
 import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
+import { RepositoryTable } from './repositories.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
@@ -62,7 +63,8 @@ export function SourceSettings({ focus }: { focus?: string }) {
   const { sources } = useSettings().settings
   useEffect(() => { if (focus) document.getElementById(`dt-source-${focus}`)?.scrollIntoView?.({ block: 'start' }) }, [focus])
   return <div className="dt-form">
-    {sources.map(source => <SourceCard key={source.id} source={source} />)}
+    {sources.map(source => <Fragment key={source.id}><SourceCard source={source} />
+      {source.id === 'github' && source.installed && <RepositoryTable />}</Fragment>)}
     <ConfigHistory blocks={['source:']} />
   </div>
 }
