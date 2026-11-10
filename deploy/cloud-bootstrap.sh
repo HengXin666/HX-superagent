@@ -4,7 +4,7 @@
 #
 #   deploy/cloud-bootstrap.sh all            # machine steps, in order: prereqs install profile gh-agent gateway service configure status
 #   deploy/cloud-bootstrap.sh <step> ...     # any of those, or the GitHub steps for after the agent signs in:
-#                                            #   collaborator github-user issue  (all need SUPERAGENT_GITHUB_REPOSITORY)
+#                                            #   collaborator configure github-user allow issue  (all need SUPERAGENT_GITHUB_REPOSITORY)
 #
 # Everything lives under $AI_DEV (default ~/ai-dev), $DSH_HOME (default ~/.dsh), ~/.config/systemd/user,
 # ~/.local/bin and ~/.config/gh-agent. Other dsh profiles (for example `web`) and their services are not touched.
@@ -258,6 +258,8 @@ step_status() {
   systemctl --user is-active "$UNIT" || true
   (cd "$CHECKOUT" && docker compose ps --format '{{.Service}} {{.State}} {{.Health}}') || true
   (cd "$CHECKOUT" && scripts/dsh-superagent --profile "$PROFILE" --url "http://127.0.0.1:$SUPERAGENT_PORT" status) || echo "status exit $? (0 ok, 2 part error, 3 waits for setup)"
+  (cd "$CHECKOUT" && SUPERAGENT_PORT="$SUPERAGENT_PORT" node deploy/configure.mjs --show) || true
+  [ -f "$STATE_DIR/github_user_instance" ] && echo "github_user instance on file: $(cat "$STATE_DIR/github_user_instance")"
   echo "panel: ssh -L $SUPERAGENT_PORT:127.0.0.1:$SUPERAGENT_PORT $USER@<server>, then the token URL from:"
   echo "  journalctl --user -u $UNIT | grep -o 'http://127.0.0.1:$SUPERAGENT_PORT/?token=[^ ]*' | tail -1"
 }
@@ -318,6 +320,14 @@ step_github_user() {
   (cd "$CHECKOUT" && SUPERAGENT_PORT="$SUPERAGENT_PORT" HX_ROUTER_GITHUB_INSTANCE="$id" node deploy/configure.mjs --github-instance)
 }
 
+# The owner opens the test Issue, so the owner must be on the GitHub Source's allowed list or the Issue is ignored.
+step_allow() {
+  say "allow: put the owner on the GitHub Source's list of accounts that may originate work"
+  local owner
+  owner="$(gh api user --jq .login)"
+  (cd "$CHECKOUT" && SUPERAGENT_PORT="$SUPERAGENT_PORT" node deploy/configure.mjs --allow-github "$owner")
+}
+
 step_issue() {
   say "issue: a real Issue on $SUPERAGENT_GITHUB_REPOSITORY that mentions the agent, then wait for its reply"
   need_repo
@@ -347,6 +357,7 @@ for step in "$@"; do
     gh-agent) step_gh_agent ;;
     collaborator) step_collaborator ;;
     github-user) step_github_user ;;
+    allow) step_allow ;;
     issue) step_issue ;;
     *) echo "unknown step: $step" >&2; exit 1 ;;
   esac

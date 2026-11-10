@@ -22,7 +22,7 @@ MODEL_FROM_PROFILE=web deploy/cloud-bootstrap.sh all     # omit MODEL_FROM_PROFI
 
 # 3. GitHub, one command; each step stops with a reason when something is off
 export SUPERAGENT_GITHUB_REPOSITORY=HengXin666/dsh-superagent-sandbox
-deploy/cloud-bootstrap.sh collaborator configure github-user status issue
+deploy/cloud-bootstrap.sh collaborator configure github-user allow status issue
 ```
 
 | Step | What it does | Stops when |
@@ -30,7 +30,8 @@ deploy/cloud-bootstrap.sh collaborator configure github-user status issue
 | `collaborator` | owner's `gh` adds the agent with `permission=push` on `REPO` only; `gh-agent` accepts the invite | `gh-agent` is the owner's account, no invite arrives, push is not granted |
 | `configure` | fills the GitHub Source (`repository`, `cli=~/.local/bin/gh-agent`) | the panel refuses the save (`agentCli*`, `repositoryReadOnly`) |
 | `github-user` | creates/checks the gateway's `github_user` instance and sets hxrouter `githubInstance` to it | HX-Email or the running gateway image has no `github_user`, `gh-agent` inside the gateway cannot read the account, the gateway's check fails |
-| `status` | unit, containers, `dsh-superagent status` (0 ok, 2 part error, 3 waits for setup) | never; prints |
+| `allow` | puts the owner (plain `gh`'s login) on the GitHub Source's list of accounts that may originate work; off that list, an Issue that mentions the agent is ignored | the policy save fails |
+| `status` | unit, containers, hxrouter `githubInstance`, GitHub repository and allowed list, `dsh-superagent status` (0 ok, 2 part error, 3 waits for setup) | never; prints |
 | `issue` | opens a real Issue mentioning the agent and waits up to `ISSUE_WAIT_SECONDS` (600) for its reply | never; prints the comments, or where to look |
 
 On a machine already installed, use this order instead of step 1. `git pull` comes first and on its own line, because the script that runs next is the one it fetches. `install` then fast-forwards the HX-Email checkout, and `gateway` rebuilds the gateway image from it, adds `GH_AGENT_CONFIG_DIR` to an older `.env` and sets `APP_UID`. `gh-agent` goes last, so the run ends by printing which account the agent is signed in as.
@@ -41,7 +42,7 @@ git pull --ff-only
 deploy/cloud-bootstrap.sh install gateway service gh-agent
 ~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web    # only if the line above says "not signed in"
 export SUPERAGENT_GITHUB_REPOSITORY=HengXin666/dsh-superagent-sandbox
-deploy/cloud-bootstrap.sh collaborator configure github-user status issue
+deploy/cloud-bootstrap.sh collaborator configure github-user allow status issue
 ```
 
 If `git pull --ff-only` refuses, `git status` shows local edits on the server; stash or drop them first. The agent replies only once a model key is in place (§ Model).
