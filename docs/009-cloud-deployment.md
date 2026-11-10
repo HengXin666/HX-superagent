@@ -9,8 +9,15 @@ Run as the deployment user (here `loli`), from the checkout, in bash. `REPO` is 
 Paste the block **one line at a time**, or as a block that keeps its line breaks. Joined onto one line, the words run into the previous command: `git pull deploy/cloud-bootstrap.sh …` makes git treat the script path as a remote (`fatal: 'deploy/cloud-bootstrap.sh' does not appear to be a git repository`). Switch user with `su - loli` (or `sudo -iu loli`), not plain `su loli`, so that the login environment (HOME, PATH, the user's systemd session) is loli's own. `gh-agent` lives in `~/.local/bin`, which a fresh shell may not have on PATH, so the blocks call it by its full path. The person's sign-in (step 2) cannot be scripted, so there are always at least two runs of the script.
 
 ```sh
-# 0. root, once (step 1 prints this line if anything is missing)
-apt-get install -y git curl xz-utils python3 tmux gh docker.io docker-compose-plugin
+# 0. root, once (step 1 prints these lines if anything is missing). gh comes from cli.github.com, not the distro (§ gh 2.48+)
+apt-get install -y git curl xz-utils python3 tmux docker.io docker-compose-plugin
+mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+chmod 644 /etc/apt/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+chmod 644 /etc/apt/sources.list.d/github-cli.list
+apt-get update && apt-get install -y gh
+gh --version
 usermod -aG docker loli && loginctl enable-linger loli
 
 # 1. machine: Node, dsh, build, profile, gh-agent wrapper, gateway, systemd service, hxrouter Source
@@ -31,15 +38,19 @@ deploy/cloud-bootstrap.sh collaborator configure github-user allow status issue
 | `configure` | fills the GitHub Source (`repository`, `cli=~/.local/bin/gh-agent`) | the panel refuses the save (`agentCli*`, `repositoryReadOnly`) |
 | `github-user` | creates/checks the gateway's `github_user` instance and sets hxrouter `githubInstance` to it | HX-Email or the running gateway image has no `github_user`, `gh-agent` inside the gateway cannot read the account, the gateway's check fails |
 | `allow` | puts the owner (plain `gh`'s login) on the GitHub Source's list of accounts that may originate work; off that list, an Issue that mentions the agent is ignored | the policy save fails |
-| `status` | unit, containers, hxrouter `githubInstance`, GitHub repository and allowed list, `dsh-superagent status` (0 ok, 2 part error, 3 waits for setup) | never; prints |
+| `status` | gh version (warns below 2.48), unit, containers, hxrouter `githubInstance`, GitHub repository and allowed list, `dsh-superagent status` (0 ok, 2 part error, 3 waits for setup) | never; prints |
 | `issue` | opens a real Issue mentioning the agent and waits up to `ISSUE_WAIT_SECONDS` (600) for its reply | never; prints the comments, or where to look |
 
 On a machine already installed, use this order instead of step 1. `git pull` comes first and on its own line, because the script that runs next is the one it fetches. `install` then fast-forwards the HX-Email checkout, and `gateway` rebuilds the gateway image from it, adds `GH_AGENT_CONFIG_DIR` to an older `.env` and sets `APP_UID`. `gh-agent` goes last, so the run ends by printing which account the agent is signed in as.
 
 ```sh
+# as root first, only if `gh --version` is below 2.48 (the script path works once the checkout is pulled)
+/home/loli/ai-dev/HX-superagent/deploy/cloud-bootstrap.sh gh
+
+# then as loli
 cd ~/ai-dev/HX-superagent
 git pull --ff-only
-deploy/cloud-bootstrap.sh install gateway service gh-agent
+deploy/cloud-bootstrap.sh prereqs install gateway service gh-agent
 ~/.local/bin/gh-agent auth login --hostname github.com --git-protocol https --web    # only if the line above says "not signed in"
 export SUPERAGENT_GITHUB_REPOSITORY=HengXin666/dsh-superagent-sandbox
 deploy/cloud-bootstrap.sh collaborator configure github-user allow status issue
@@ -68,14 +79,14 @@ Paths the deployment owns: `~/ai-dev/{node,node_modules,HX-superagent,HX-Email}`
 | Node.js | 22.x tarball in `~/ai-dev/node` (`NODE_VERSION`) | 22.19+ or 24+ |
 | pnpm | 11.7.0 for the build; corepack shim in `~/.local/bin` | `dsh plugin` calls `pnpm` from PATH, so it must be on the **user's** PATH |
 | dsh | `@deepseek-ai/dsh@0.2.1-rc.2` in `~/ai-dev/node_modules` (`DSH_VERSION`) | must satisfy `engines.dsh` |
-| gh | distro or cli.github.com package | 2.48+ |
+| gh | cli.github.com apt package (Debian 13's own is 2.46.0, too old) | 2.48+: `gh api --paginate --slurp` (§ gh 2.48+) |
 | Docker | Engine + compose plugin | `docker compose wait` needs compose 2.23+ |
 
 ## Steps
 
 ### 1. prereqs
 
-As root, once: `apt-get install -y git curl xz-utils python3 tmux gh docker.io docker-compose-plugin`, then `usermod -aG docker <user>` and `loginctl enable-linger <user>`. The script stops and prints this line if `git`, `gh` or `docker` is missing. Then, as the user, it unpacks Node into `~/ai-dev/node` and activates pnpm through corepack in `~/.local/bin`.
+As root, once: the step 0 lines of § Run order (packages, the cli.github.com repository and `gh`, `usermod -aG docker <user>`, `loginctl enable-linger <user>`). The script stops and prints the package line if `git` or `docker` is missing. It then checks `gh --version` against `GH_MIN` (2.48.0). When gh is missing or older, it adds the official repository and upgrades gh itself if it runs as root or has passwordless sudo, and restarts the service if it is running. Otherwise it prints the root commands and stops. `sudo deploy/cloud-bootstrap.sh gh` (or the same path run as root) does only this part. Then, as the user, it unpacks Node into `~/ai-dev/node` and activates pnpm through corepack in `~/.local/bin`.
 
 ### 2. install
 
@@ -202,6 +213,79 @@ journalctl --user -u dsh-superagent | grep -o 'http://127.0.0.1:3082/?token=[^ ]
 ```
 
 Open that URL locally, then choose **Superagent** (`/orchestrator`). The token is a login credential; do not share it.
+
+### Panel inside an existing DSH web app (`web-panel`)
+
+When the server already runs a DSH web profile behind a reverse proxy (on the first server: profile `web`, `dsh-web.service` on `127.0.0.1:38470`, started with `--public-url https://dsh.woa.qzz.io --trusted-host dsh.woa.qzz.io`, fronted by Safeline), the plugin can run in that process instead of its own. The panel then opens from the public URL with DSH's normal sign-in, and no SSH tunnel is needed.
+
+```sh
+cd ~/ai-dev/HX-superagent
+git pull --ff-only
+deploy/cloud-bootstrap.sh install
+deploy/cloud-bootstrap.sh web-panel
+deploy/cloud-bootstrap.sh status
+```
+
+`web-panel` (variables `WEB_PROFILE`, `WEB_UNIT`, `WEB_PORT`) does the following:
+1. Links the plugin into the web profile (`dsh plugin --profile web add link:<checkout>`).
+2. Appends `- id: dsh-superagent` with `stateDir: ~/.dsh/state/superagent` to that profile's `cordis.patch.yml`. The previous file is kept as `cordis.patch.yml.before-superagent`, and the profile's `webserver` and `connection` entries are left as they are.
+3. Writes the router key to `~/.dsh/state/superagent/hx_router.env` (600) and adds the drop-in `~/.config/systemd/user/dsh-web.service.d/superagent.conf` with `EnvironmentFile=` pointing at it. The standalone run script used to export it.
+4. Stops and disables `dsh-superagent.service`, because only one process may hold the stateDir's lock.
+5. Records `~/.dsh/state/superagent/panel-host` (port, unit, profile) and restarts `dsh-web.service`.
+6. Waits for the management API on `127.0.0.1:38470`.
+
+From then on, `configure`, `github-user`, `allow`, `status` and `issue` talk to port 38470, and `service` is skipped. Tickets, sources and settings carry over, because the stateDir is the same. Restarting `dsh-web.service` ends the sessions open in that web app. Its unit has `TimeoutStopSec=20`, so a running executor gets 20 seconds instead of the standalone unit's 330.
+
+**Who the management API accepts** (`managementAdmission` in `src/app/http.ts`). Every request needs `x-orchestrator-request: 1`, and an Origin header, when present, must be the request's own authority.
+- A direct loopback request (Host `127.0.0.1:<port>` or `localhost:<port>`, no `Forwarded`/`X-Forwarded-*`/`X-Real-IP` header) passes with an `http://<host>` Origin or none, as before. `configure.mjs`, `status` and the SSH tunnel rely on this.
+- Any other Host, and a loopback Host that carries a proxy header, goes through DSH's own Connection fence (`ctx.connection.requestRejection`). That fence accepts loopback, the bind address and the `trustedHosts` the profile's `connection` entry holds (here from `--trusted-host`), rejects `Sec-Fetch-Site: cross-site`, and requires the browser's signed DSH cookie. An unknown Host gets 403, and a missing or expired DSH sign-in gets 401. A profile without that service refuses every such request.
+
+The loopback rule assumes the proxy passes the public Host through and adds `X-Forwarded-For`. Check that this holds after the switch with the proxy tests below. If it answers 200, the proxy is rewriting Host to the loopback address and dropping the forwarding headers, and the API is open to the internet. In that case, turn the panel back to the standalone unit (rollback below) until the proxy is fixed.
+
+Verify:
+
+```sh
+# on the server, as loli
+deploy/cloud-bootstrap.sh status                     # dsh-web.service active, dsh-superagent.service inactive, settings readable
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' http://127.0.0.1:38470/orchestrator/api/settings        # 200: loopback still direct
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' -H 'Host: dsh.woa.qzz.io' http://127.0.0.1:38470/orchestrator/api/settings   # 401: trusted authority, no DSH sign-in
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' -H 'Host: evil.example' http://127.0.0.1:38470/orchestrator/api/settings     # 403: unknown authority
+
+# from anywhere, through the proxy
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' https://dsh.woa.qzz.io/orchestrator/api/settings          # 401
+curl -s -o /dev/null -w '%{http_code}\n' https://dsh.woa.qzz.io/orchestrator/api/settings                                          # 403: no panel marker
+```
+
+Then, in a browser signed in to `https://dsh.woa.qzz.io`, open the **Superagent** entry (`/orchestrator`). Pages load, and a save (for example toggling and restoring a Source switch, or pausing and resuming) succeeds instead of answering 403. In the browser's network panel, the `orchestrator/api` calls show 200.
+
+Rollback to the standalone unit:
+
+```sh
+cp -p ~/.dsh/profiles/web/cordis.patch.yml.before-superagent ~/.dsh/profiles/web/cordis.patch.yml
+(cd ~/ai-dev/HX-superagent && dsh plugin --profile web remove dsh-superagent)
+rm -f ~/.config/systemd/user/dsh-web.service.d/superagent.conf ~/.dsh/state/superagent/panel-host
+systemctl --user daemon-reload
+systemctl --user restart dsh-web.service
+deploy/cloud-bootstrap.sh service
+```
+
+## gh 2.48+
+
+`src/infra/commands.ts` and `src/sources/github-read.ts` call `gh api … --paginate --slurp`. `--slurp` arrived in gh 2.48, and older gh rejects it as an unknown flag. Debian 13 ships gh 2.46.0. On the first server that gh made every GitHub Source poll fail, four in a row, so no Issue ever became a Trigger. After upgrading to 2.103.3 from cli.github.com and restarting the service, the next poll picked up Issue #4, and the agent replied through the gateway's `github_user` instance. GitHub's own install page also warns that the distro-packaged 2.45.x and 2.46.x are broken against current GitHub APIs.
+
+The gateway image is not affected: `deploy/gateway.Dockerfile` already installs gh from cli.github.com. The host's gh is the one that matters, because `gh-agent` wraps it.
+
+Verify, as the deployment user:
+
+```sh
+gh --version                           # 2.48.0 or newer
+apt-cache policy gh                    # the installed version comes from https://cli.github.com/packages
+~/.local/bin/gh-agent api "repos/$SUPERAGENT_GITHUB_REPOSITORY/issues?per_page=1" --paginate --slurp > /dev/null && echo slurp ok
+deploy/cloud-bootstrap.sh status       # first line: gh <version>, or a warning when it is too old
+journalctl --user -u dsh-superagent --since -10min | grep -i slurp   # empty once fixed
+```
+
+After upgrading gh by hand, run `systemctl --user restart dsh-superagent`.
 
 ## Pitfalls seen on the first server
 

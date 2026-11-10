@@ -1,4 +1,4 @@
-/** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
+/** Management HTTP routes for the web panel: direct loopback, or any authority DSH's own Connection fence trusts and authenticates. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -72,10 +72,35 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
-  const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
+/** The part of DSH's Connection service (`ctx.connection`) used here: its Host/Origin fence plus browser authentication. */
+export interface ConnectionFence { requestRejection(request: Pick<IncomingMessage, 'headers'>): 401 | 403 | undefined }
+/** Headers a reverse proxy adds; a request carrying one did not come straight from this machine, whatever its Host says. */
+const FORWARDED = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip'] as const
+/**
+ * Decides whether a management request may proceed. Every request must carry `x-orchestrator-request: 1`, and an attached
+ * Origin must name the request's own authority.
+ * - Direct loopback (`127.0.0.1:<port>` or `localhost:<port>`, no proxy header): allowed with an `http://<host>` Origin or
+ *   none, as before. Local scripts and the SSH tunnel rely on this and carry no browser credential.
+ * - Any other authority, or a loopback Host relayed by a proxy: only through DSH's own fence (`ctx.connection`), which accepts
+ *   the authorities the Web server already trusts (loopback, its bind address, `trustedHosts` from `--trusted-host`) and
+ *   requires the browser's signed DSH credential. Without that service such requests are refused.
+ * @returns 200 to proceed, else the status to answer with.
+ */
+export function managementAdmission(req: Pick<IncomingMessage, 'headers'>, port: number, connection?: ConnectionFence): 200 | 401 | 403 {
+  const { host, origin } = req.headers
+  if (req.headers['x-orchestrator-request'] !== '1' || typeof host !== 'string' || host === '') return 403
+  const proxied = FORWARDED.some(name => req.headers[name] !== undefined)
+  if (!proxied && (host === `127.0.0.1:${port}` || host === `localhost:${port}`)) return origin === undefined || origin === `http://${host}` ? 200 : 403
+  if (!connection) return 403
+  if (origin !== undefined && !sameAuthority(origin, host)) return 403
+  return connection.requestRejection(req) ?? 200
+}
+/** Whether an Origin header is the http(s) origin of `host`; the scheme may differ because a TLS proxy fronts a plain listener. */
+function sameAuthority(origin: string, host: string): boolean {
+  try {
+    const url = new URL(origin)
+    return (url.protocol === 'https:' || url.protocol === 'http:') && url.host === new URL(`http://${host}`).host
+  } catch { return false }
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
@@ -227,6 +252,11 @@ function match(table: Routes, method: string, segments: string[]) {
   }
   return undefined
 }
+/** DSH's Connection service when the profile loads it (`client-connection`); read per request so a restart of it is picked up. */
+function connectionOf(ctx: Context): ConnectionFence | undefined {
+  const service = (ctx as unknown as { get?(name: string): unknown }).get?.('connection') as Partial<ConnectionFence> | undefined
+  return typeof service?.requestRejection === 'function' ? service as ConnectionFence : undefined
+}
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
@@ -234,7 +264,9 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      const admitted = managementAdmission(req, ctx.webServer.port, connectionOf(ctx))
+      if (admitted === 401) { json(res, 401, { error: 'Sign in to DSH first: open the DSH link with its token once' }); return }
+      if (admitted !== 200) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

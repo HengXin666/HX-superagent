@@ -10,9 +10,10 @@ import { SetupError } from '../src/setup.ts'
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1', connection?: unknown) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
+    get: (name: string) => name === 'connection' ? connection : undefined }
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
@@ -78,6 +79,48 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
+})
+
+it('answers another authority only through DSH\'s Connection fence, and a proxied loopback Host too', async () => {
+  const runtime = { sessions: { delivery: async () => 'injected' }, engine: { unsubscribe: () => true } }
+  const forbidden = { status: 403, body: { error: 'Same-origin management request required' } }
+  const seen: unknown[] = []
+  let verdict: 401 | 403 | undefined
+  const fence = { requestRejection: (req: { headers: Headers }) => { seen.push(req.headers.host); return verdict } }
+  const post = (call: ReturnType<typeof serve>, headers: Headers) => call('POST', 'threads/github%3A1/unsubscribe', undefined, headers)
+  const publicHost = { host: 'dsh.example.com', origin: 'https://dsh.example.com', 'x-forwarded-for': '203.0.113.9' }
+
+  // Without the Connection service nothing but direct loopback gets through.
+  const bare = serve(runtime)
+  expect(await post(bare, publicHost)).toEqual(forbidden)
+  expect(await post(bare, { 'x-forwarded-for': '203.0.113.9' })).toEqual(forbidden)
+  expect(await post(bare, {})).toMatchObject({ status: 200 })
+
+  const call = serve(runtime, '127.0.0.1', fence)
+  expect(await post(call, publicHost)).toMatchObject({ status: 200 })
+  expect(await post(call, { ...publicHost, origin: undefined })).toMatchObject({ status: 200 })
+  expect(await post(call, { ...publicHost, origin: 'http://dsh.example.com' })).toMatchObject({ status: 200 })
+  // A loopback Host relayed by a proxy goes through the fence as well.
+  expect(await post(call, { 'x-forwarded-for': '203.0.113.9' })).toMatchObject({ status: 200 })
+  expect(seen).toEqual(['dsh.example.com', 'dsh.example.com', 'dsh.example.com', '127.0.0.1:3082'])
+
+  // The panel marker and a matching Origin are still required, and the fence is not even asked otherwise.
+  seen.length = 0
+  for (const headers of [{ ...publicHost, 'x-orchestrator-request': undefined }, { ...publicHost, origin: 'https://evil.example' },
+    { ...publicHost, origin: 'null' }, { ...publicHost, origin: 'https://dsh.example.com.evil.example' }]) {
+    expect(await post(call, headers), JSON.stringify(headers)).toEqual(forbidden)
+  }
+  expect(seen).toEqual([])
+
+  // The fence's verdict is final: an untrusted authority is 403, a missing DSH credential 401.
+  verdict = 403
+  expect(await post(call, { host: 'evil.example', origin: 'https://evil.example' })).toEqual(forbidden)
+  verdict = 401
+  expect(await post(call, publicHost)).toEqual({ status: 401, body: { error: 'Sign in to DSH first: open the DSH link with its token once' } })
+  // Direct loopback never consults the fence.
+  seen.length = 0
+  expect(await post(call, { host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
+  expect(seen).toEqual([])
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {
