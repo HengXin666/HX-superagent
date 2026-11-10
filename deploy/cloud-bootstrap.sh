@@ -343,6 +343,19 @@ step_web_panel() {
   [ -d "$web_dir" ] || { echo "no DSH profile at $web_dir" >&2; exit 1; }
   systemctl --user cat "$WEB_UNIT" > /dev/null || { echo "no systemd user unit $WEB_UNIT" >&2; exit 1; }
   [ -f "$CHECKOUT/lib/index.js" ] || { echo "the plugin is not built; run: deploy/cloud-bootstrap.sh install" >&2; exit 1; }
+  # The standalone run script put the router key into the environment; the web unit gets it from an EnvironmentFile.
+  if [ -r "$STATE_DIR/hx_router_token" ]; then
+    printf 'HX_ROUTER_TOKEN=%s\n' "$(cat "$STATE_DIR/hx_router_token")" > "$STATE_DIR/hx_router.env"
+    chmod 600 "$STATE_DIR/hx_router.env"
+  fi
+  mkdir -p "$dropin"
+  printf '[Service]\nEnvironmentFile=-%s\n' "$STATE_DIR/hx_router.env" > "$dropin/superagent.conf"
+  # HMR applies the link and the patch to the running web process at once, so stop the standalone holder of
+  # the stateDir lock first.
+  if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    systemctl --user disable --now "$UNIT"
+    echo "stopped and disabled $UNIT"
+  fi
   if [ ! -L "$web_dir/node_modules/dsh-superagent" ]; then
     (cd "$CHECKOUT" && dsh plugin --profile "$WEB_PROFILE" add "link:$CHECKOUT")
   fi
@@ -351,18 +364,6 @@ step_web_panel() {
     [ -f "$patch" ] && cp -p "$patch" "$patch.before-superagent"
     printf -- '- id: dsh-superagent\n  config:\n    stateDir: %s\n' "$STATE_DIR" >> "$patch"
     echo "added dsh-superagent (stateDir $STATE_DIR) to $patch; the previous file is $patch.before-superagent"
-  fi
-  # The standalone run script put the router key into the environment; the web unit gets it from an EnvironmentFile.
-  if [ -r "$STATE_DIR/hx_router_token" ]; then
-    printf 'HX_ROUTER_TOKEN=%s\n' "$(cat "$STATE_DIR/hx_router_token")" > "$STATE_DIR/hx_router.env"
-    chmod 600 "$STATE_DIR/hx_router.env"
-  fi
-  mkdir -p "$dropin"
-  printf '[Service]\nEnvironmentFile=-%s\n' "$STATE_DIR/hx_router.env" > "$dropin/superagent.conf"
-  # One process per stateDir: stop and disable the standalone unit before the web profile opens it.
-  if systemctl --user is-enabled --quiet "$UNIT" 2>/dev/null || systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
-    systemctl --user disable --now "$UNIT"
-    echo "stopped and disabled $UNIT"
   fi
   printf 'port=%s\nunit=%s\nprofile=%s\n' "$WEB_PORT" "$WEB_UNIT" "$WEB_PROFILE" > "$PANEL_HOST_FILE"
   systemctl --user daemon-reload

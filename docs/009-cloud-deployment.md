@@ -240,7 +240,9 @@ From then on, `configure`, `github-user`, `allow`, `status` and `issue` talk to 
 - A direct loopback request (Host `127.0.0.1:<port>` or `localhost:<port>`, no `Forwarded`/`X-Forwarded-*`/`X-Real-IP` header) passes with an `http://<host>` Origin or none, as before. `configure.mjs`, `status` and the SSH tunnel rely on this.
 - Any other Host, and a loopback Host that carries a proxy header, goes through DSH's own Connection fence (`ctx.connection.requestRejection`). That fence accepts loopback, the bind address and the `trustedHosts` the profile's `connection` entry holds (here from `--trusted-host`), rejects `Sec-Fetch-Site: cross-site`, and requires the browser's signed DSH cookie. An unknown Host gets 403, and a missing or expired DSH sign-in gets 401. A profile without that service refuses every such request.
 
-The loopback rule assumes the proxy passes the public Host through and adds `X-Forwarded-For`. Check that this holds after the switch with the proxy tests below. If it answers 200, the proxy is rewriting Host to the loopback address and dropping the forwarding headers, and the API is open to the internet. In that case, turn the panel back to the standalone unit (rollback below) until the proxy is fixed.
+The loopback rule assumes the proxy passes the public Host through and adds `X-Forwarded-For`. On the first server, Safeline's site config (`resources/nginx/sites-enabled/IF_backend_<n>`) sets `proxy_set_header Host $http_host` and `X-Forwarded-For`, so the rule holds. That site's `custom_params` also appends a long-lived signed `dsh-auth-*` cookie to every request it forwards, which makes Safeline's auth center the real gate. A request that passes Safeline therefore also passes DSH's sign-in, for the panel as for the rest of DSH. A request that has not signed in to Safeline gets Safeline's challenge (HTTP 467) and never reaches DSH.
+
+The profile has HMR on: the base bundle enables it whenever a profile context exists. `dsh plugin add` and an edit to `cordis.patch.yml` therefore apply to the running process at once. Make those two changes only after the standalone unit has stopped, or the web process opens the stateDir while it is still locked. `web-panel` does them in that order.
 
 Verify:
 
@@ -251,9 +253,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' http://1
 curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' -H 'Host: dsh.woa.qzz.io' http://127.0.0.1:38470/orchestrator/api/settings   # 401: trusted authority, no DSH sign-in
 curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' -H 'Host: evil.example' http://127.0.0.1:38470/orchestrator/api/settings     # 403: unknown authority
 
-# from anywhere, through the proxy
-curl -s -o /dev/null -w '%{http_code}\n' -H 'x-orchestrator-request: 1' https://dsh.woa.qzz.io/orchestrator/api/settings          # 401
-curl -s -o /dev/null -w '%{http_code}\n' https://dsh.woa.qzz.io/orchestrator/api/settings                                          # 403: no panel marker
+# from a machine not signed in to Safeline
+curl -s -o /dev/null -w '%{http_code}\n' -A 'Mozilla/5.0' -H 'x-orchestrator-request: 1' https://dsh.woa.qzz.io/orchestrator/api/settings   # 467: Safeline challenge, DSH not reached
 ```
 
 Then, in a browser signed in to `https://dsh.woa.qzz.io`, open the **Superagent** entry (`/orchestrator`). Pages load, and a save (for example toggling and restoring a Source switch, or pausing and resuming) succeeds instead of answering 403. In the browser's network panel, the `orchestrator/api` calls show 200.
