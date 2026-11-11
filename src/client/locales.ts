@@ -179,6 +179,7 @@ const TEXT = {
   'sourceState.warning': ['待处理', 'Pending'],
   'sourceState.error': ['出错', 'Failing'],
   sourceOpenSettings: ['去设置', 'Open settings'],
+  sourceAddRepository: ['添加 GitHub 仓库', 'Add a GitHub repository'],
   'sourceState.setup': ['等待部署检查', 'Waiting for the deployment check'],
   setupFixLink: ['去修正', 'Fix it'],
   'openSettingsOf.deployment': ['去部署页修改', 'Change it on Deployment'],

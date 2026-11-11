@@ -138,6 +138,10 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
           </div></li>)}</ul>
         </div>
       </DisclosureRow>}
+      {source.id === 'github' && <p className="dt-row-meta">
+        <button type="button" className="dt-textlink"
+          onClick={() => navigate(settingsRoute('source', { source: 'github' }))}>{t('sourceAddRepository')}</button>
+      </p>}
       {dropped.length > 0 && <DroppedReplies items={dropped} />}
     </div>
   </li>
