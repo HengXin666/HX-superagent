@@ -151,6 +151,7 @@ const TEXT = {
   sourceNotInstalledHint: ['提供这个来源的插件没有加载，配置按保存时的样子保留。', 'The plugin that provides this Source is not loaded; its configuration is kept as saved.'],
   sourceEnable: ['运行来源：{name}', 'Run Source: {name}'],
   addRow: ['添加', 'Add'],
+  addRepo: ['添加仓库', 'Add repository'],
   repositoriesTitle: ['GitHub 仓库', 'GitHub repositories'],
   repositoriesHint: ['每个仓库是 GitHub 来源的一个实例：有自己的允许名单、接收表、工单和线程，账号与轮询设置共用默认仓库的。最多 {max} 个（含默认仓库）。保存会检查智能体账号能否推送到新加的仓库，然后重启 dsh-superagent；删除有进行中工单的仓库会被拒绝。', 'Each repository is an instance of the GitHub Source with its own allowed accounts, admission table, tickets and threads; the account and polling settings are the default repository\'s. At most {max}, the default one included. Saving checks that the agent account can push to added repositories, then restarts dsh-superagent; removing a repository with open tickets is refused.'],
   repositoriesDefault: ['默认仓库，在上面的 GitHub 卡片里改', 'Default repository, changed on the GitHub card above'],

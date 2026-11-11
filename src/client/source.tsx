@@ -2,7 +2,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
-import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { RepositoryTable } from './repositories.tsx'
 import { sourceMark } from './marks.ts'
@@ -43,6 +43,9 @@ function SourceCard({ source }: { source: SourceView }) {
         </div>
         {source.installed && <Switch checked={value.enabled} onChange={enabled => draft.edit({ ...value, enabled })}
           label={t('sourceEnable', { name: localized(t, source.title) })} />}
+        {source.id === 'github' && <Button variant="outline" size="sm" icon={<Icon name="plus" />}
+          onClick={() => document.getElementById('dt-source-github-repositories')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
+          aria-label={t('addRepo')}>{t('addRepo')}</Button>}
       </div>
       {problem && <div className="dt-row-buttons">
         <p className="dt-error" role="status"><SetupMessage problem={problem} lead /></p><CheckSetupButton />

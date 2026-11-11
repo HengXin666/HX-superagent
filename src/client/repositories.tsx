@@ -81,15 +81,25 @@ export function RepositoryTable() {
     finally { setBusy(false) }
   }
   const templates = settings.sources.filter(source => source.kind === 'github')
+  const scrollToAdd = () => {
+    const id = 'dt-source-github-repositories-new'
+    document.getElementById(id)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    document.querySelector<HTMLInputElement>(`#${id} input`)?.focus()
+  }
   return <section id="dt-source-github-repositories" className="dt-card" aria-label={t('repositoriesTitle')}>
     <div className="dt-card-head"><div className="dt-row-main"><div className="dt-row-title">
       <span className="dt-card-title">{t('repositoriesTitle')}</span><span className="dt-count">{current.length + 1}</span>
-    </div></div></div>
+    </div></div>
+    <div className="dt-row-buttons">
+      <Button variant="primary" size="sm" icon={<Icon name="plus" />} disabled={busy || full}
+        onClick={() => { edit([...current, { repository: '', enabled: true }]); requestAnimationFrame(scrollToAdd) }}>{t('addRepo')}</Button>
+    </div></div>
     <Hint>{t('repositoriesHint', { max: block.max })}</Hint>
     <ul className="dt-rows" style={{ ['--dt-columns' as string]: 2 }}>
       <li className="dt-rows-item"><span className="dt-row-label dt-mono">{primaryRepository || '—'}</span>
         <span className="dt-hint">{t('repositoriesDefault')}</span></li>
-      {current.map((row, index) => <li key={row.id ?? `new-${index}`} className="dt-rows-item">
+      {current.map((row, index) => <li key={row.id ?? `new-${index}`} className="dt-rows-item"
+        id={!row.id && index === current.length - 1 ? 'dt-source-github-repositories-new' : undefined}>
         <Input className="dt-mono" aria-label={t('repositoriesRepository')} placeholder="owner/name" spellCheck={false} required
           pattern={REPOSITORY.source.slice(1, -1)} value={row.repository} disabled={busy || !!row.id}
           onChange={event => edit(current.map((item, position) => position === index ? { ...item, repository: event.target.value } : item))} />
