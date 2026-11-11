@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yetone/magpie 的实际开发流</title>
+<style>
+:root{--ink:#1b1f24;--mute:#5b6570;--line:#d9dee3;--bg:#fafbfc;--card:#fff;--blue:#2563eb;--green:#15803d;--red:#b91c1c;--amber:#b45309;--violet:#6d28d9}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
+main{max-width:1080px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:30px;margin:0 0 6px}
+.sub{color:var(--mute);margin:0 0 28px}
+h2{font-size:21px;margin:44px 0 14px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
+h3{font-size:16px;margin:22px 0 8px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 26px 22px;margin-top:22px}
+section h2{border-bottom-color:var(--line)}
+table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+th{background:#f1f4f7}
+code{background:#f1f4f7;padding:1px 5px;border-radius:4px;font:13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.note{border-left:4px solid var(--amber);background:#fff8eb;padding:10px 14px;margin:12px 0;border-radius:0 6px 6px 0}
+.key{border-left:4px solid var(--red);background:#fdf0f0;padding:10px 14px;margin:12px 0;border-radius:0 6px 6px 0}
+.ok{border-left:4px solid var(--green);background:#eefaf1;padding:10px 14px;margin:12px 0;border-radius:0 6px 6px 0}
+.tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;font-weight:600}
+.m{background:#dcfce7;color:var(--green)}.h{background:#fde2e2;color:var(--red)}.s{background:#fef3c7;color:var(--amber)}
+.timeline{display:flex;gap:0;margin:14px 0 4px;flex-wrap:wrap}
+.timeline div{flex:1;min-width:150px;border-top:3px solid var(--blue);padding:8px 10px 0 0;font-size:13px}
+.timeline b{display:block;font-size:14px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.stats div{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stats b{display:block;font-size:22px}
+.stats span{color:var(--mute);font-size:13px}
+.svgwrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:#fff;margin:12px 0}
+svg text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--mute)}
+.legend i{display:inline-block;width:28px;height:0;border-top:2px solid;vertical-align:middle;margin-right:6px}
+.chain{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}
+.chain span{border:1px solid var(--line);border-radius:6px;padding:6px 12px;background:#f8fafc;font-weight:600}
+.chain em{font-style:normal;color:var(--mute)}
+footer{color:var(--mute);font-size:13px;margin-top:40px}
+</style>
+</head>
+<body>
+<main>
+<h1>yetone/magpie 的实际开发流</h1>
+<p class="sub">一个几乎全部由 agent 编写、评审、合并、发布的开源项目，从想法到用户手里要过哪几道闸门。基于完整 git 历史（HEAD <code>12610cf2f</code>，2026-11-12 00:25 +0800）与仓库内 LESSONS.md、docs/code-standards.md、docs/contributors.md、.github/workflows/test.yml、release.yml 逐条阅读整理。</p>
+
+<div class="note"><b>先分清两个 magpie。</b>本文讲的是 <code>yetone/magpie</code>：MIT 许可的模型网关（让 Claude Code、Codex、Gemini CLI 等换用任意模型）。<code>apache/magpie</code> 是 ASF 董事会 2026-06-17 决议成立的顶级项目，前身是 Airflow PMC 下的 apache-steward，给开源维护者用的 agent 工作流框架，与 yetone 的项目毫无关系。</div>
+
+<!-- ================= 0 ================= -->
+<section>
+<h2>0 背景</h2>
+<h3>开源时间线</h3>
+<div class="timeline">
+ <div><b>2026-09-22 21:47</b>首个提交 <code>0a234ce41</code>，当时叫 dial</div>
+ <div><b>2026-09-23 23:54</b><code>402a96c39</code> 改名 magpie</div>
+ <div><b>同晚 (16:22 UTC)</b>GitHub 公开仓库建立，MIT</div>
+ <div><b>至今</b>安装包在 <code>yetone/magpie-releases</code> 发布，主仓同步一份</div>
+</div>
+<h3>为什么外界“没风声”</h3>
+<p>它从第一天起就是公开仓库，从来没有“宣布开源”这一刻，所以等不到那条新闻。（这是根据时间线做的推断。）</p>
+
+<h3>规模</h3>
+<div class="stats">
+ <div><b>7,648</b><span>提交（51 天）</span></div>
+ <div><b>≈150</b><span>日均提交</span></div>
+ <div><b>317</b><span>单日峰值（10-13）</span></div>
+ <div><b>v0.1.3786</b><span>最新 tag（共 3,787 个）</span></div>
+</div>
+
+<h3>谁在写</h3>
+<p>LESSONS.md 第一段原话：magpie 的代码由 agent 编写、评审、合并、发布。6,874 个提交作者署名 yetone（多个 agent 会话共用他的身份），其次是社区的 ggbdpq 187、JoeyWu-tech 58。社区贡献靠 612 个 <code>Co-authored-by</code> 记名。全仓只有 <b>4 个 merge 提交</b>：绝大多数工作直接推到 main，PR 流程主要给社区用。</p>
+
+<h3>返工怎么算</h3>
+<ul>
+ <li>显式 revert 只有 5 次，返工主要是“补一刀”而不是回滚。</li>
+ <li>约 427 个提交的正文点名了它修的、或之前弄坏的那个提交（按正则粗估）。</li>
+ <li>LESSONS 记录 10-05：220 个提交、约 170 次发版，其中约 40 个在修当天或前一天刚发的东西。</li>
+</ul>
+</section>
+
+<!-- ================= 1 ================= -->
+<section>
+<h2>1 全流程图</h2>
+<div class="legend">
+ <span><i style="border-color:#1b1f24"></i>主流程</span>
+ <span><i style="border-color:#6d28d9;border-top-style:dashed"></i>复盘环 / 回流</span>
+ <span><i style="border-color:#b91c1c;border-top-style:dashed"></i>规则被绕过的实际路径</span>
+ <span><i style="border-color:#b45309"></i>停下 / 关闭</span>
+</div>
+<div class="svgwrap">
+<svg viewBox="0 0 1040 1110" width="1040" height="1110" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="magpie 开发流程图">
+<defs>
+ <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#1b1f24"/></marker>
+ <marker id="av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#6d28d9"/></marker>
+ <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#b91c1c"/></marker>
+ <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#b45309"/></marker>
+</defs>
+<style>
+ .n{fill:#fff;stroke:#1b1f24;stroke-width:1.5}
+ .g{fill:#eef4ff;stroke:#2563eb;stroke-width:1.6}
+ .ci{fill:#eefaf1;stroke:#15803d;stroke-width:1.6}
+ .lp{fill:#f5f0ff;stroke:#6d28d9;stroke-width:1.5}
+ .st{fill:#fff8eb;stroke:#b45309;stroke-width:1.5}
+ .ext{fill:#f8fafc;stroke:#5b6570;stroke-width:1.5;stroke-dasharray:5 3}
+ .warn{fill:#fdf0f0;stroke:#b91c1c;stroke-width:1.5}
+ .t{font-size:14px;fill:#1b1f24;text-anchor:middle;font-weight:600}
+ .s{font-size:12px;fill:#5b6570;text-anchor:middle}
+ .l{font-size:12px;fill:#1b1f24}
+ .e{stroke:#1b1f24;stroke-width:1.5;fill:none}
+ .ev{stroke:#6d28d9;stroke-width:1.5;fill:none;stroke-dasharray:6 4}
+ .er{stroke:#b91c1c;stroke-width:1.8;fill:none;stroke-dasharray:6 4}
+ .eo{stroke:#b45309;stroke-width:1.5;fill:none}
+</style>
+
+<!-- left loop label -->
+<rect x="20" y="420" width="250" height="560" rx="14" fill="#faf7ff" stroke="#e4d9fb"/>
+<text x="145" y="444" class="t" style="fill:#6d28d9">复盘环（左侧）</text>
+
+<!-- Source -->
+<rect class="n" x="400" y="20" width="300" height="52" rx="8"/>
+<text x="550" y="42" class="t">需求来源</text>
+<text x="550" y="60" class="s">issue / Discord / X / 报告者补丁 / 维护者决定</text>
+<path class="e" d="M550 72V100" marker-end="url(#a)"/>
+
+<!-- G0 -->
+<rect class="g" x="400" y="100" width="300" height="62" rx="8"/>
+<text x="550" y="122" class="t">G0 读报告</text>
+<text x="550" y="140" class="s">读到最后一条评论 · 在报告者的界面复现</text>
+<text x="550" y="155" class="s">执行：agent 会话</text>
+
+<!-- G1 community -->
+<path class="e" d="M700 131H780" marker-end="url(#a)"/>
+<text x="712" y="124" class="l">社区 PR</text>
+<rect class="g" x="780" y="100" width="240" height="62" rx="8"/>
+<text x="900" y="122" class="t">G1 先查危害</text>
+<text x="900" y="140" class="s">5 类风险 · agent 查，维护者裁决</text>
+<path class="eo" d="M900 162V196" marker-end="url(#ao)"/>
+<rect class="st" x="790" y="196" width="220" height="44" rx="8"/>
+<text x="900" y="216" class="t" style="font-size:13px">命中 → 停审等维护者</text>
+<text x="900" y="232" class="s">放行前不在有真实账号的机器上跑</text>
+<path class="eo" d="M900 240V262" marker-end="url(#ao)"/>
+<rect class="st" x="790" y="262" width="220" height="44" rx="8"/>
+<text x="900" y="282" class="t" style="font-size:13px">已裁决/重提/秒级连发</text>
+<text x="900" y="298" class="s">直接关闭，不评审</text>
+<path class="e" d="M780 150Q740 200 700 236" marker-end="url(#a)"/>
+<text x="716" y="192" class="l">干净</text>
+
+<!-- G2 -->
+<path class="e" d="M550 162V214" marker-end="url(#a)"/>
+<text x="558" y="194" class="l">内部工作</text>
+<rect class="g" x="400" y="214" width="300" height="62" rx="8"/>
+<text x="550" y="236" class="t">G2 在自己的 worktree 写改动</text>
+<text x="550" y="254" class="s">code-standards：改动 10 条 + 测试 9 条</text>
+<text x="550" y="269" class="s">一个提交一个目标</text>
+
+<!-- G3 -->
+<path class="e" d="M550 276V306" marker-end="url(#a)"/>
+<rect class="g" x="400" y="306" width="300" height="62" rx="8"/>
+<text x="550" y="328" class="t">G3 本地验收 1–6 条</text>
+<text x="550" y="346" class="s">跑了什么写进 commit 正文</text>
+<text x="550" y="361" class="s">没跑的写“没跑”</text>
+
+<!-- G4 -->
+<path class="e" d="M700 337H780" marker-end="url(#a)"/>
+<text x="724" y="330" class="l">PR</text>
+<rect class="g" x="780" y="330" width="240" height="76" rx="8"/>
+<text x="900" y="352" class="t">G4 维护者合并</text>
+<text x="900" y="370" class="s">拉取 · 合到最新 main · 重跑</text>
+<text x="900" y="386" class="s">merge --match-head-commit</text>
+<text x="900" y="400" class="s">（全仓仅 4 个 merge 提交）</text>
+<path class="e" d="M900 406Q900 450 650 450" marker-end="url(#a)"/>
+
+<!-- main -->
+<path class="e" d="M550 368V426" marker-end="url(#a)"/>
+<text x="558" y="404" class="l">直推（绝大多数）</text>
+<rect class="n" x="450" y="426" width="200" height="48" rx="24" style="stroke-width:2.2"/>
+<text x="550" y="456" class="t" style="font-size:16px">main</text>
+
+<!-- G5 CI -->
+<path class="e" d="M550 474V510" marker-end="url(#a)"/>
+<rect class="ci" x="380" y="510" width="340" height="80" rx="8"/>
+<text x="550" y="532" class="t">G5 CI Test（GitHub Actions）</text>
+<text x="550" y="550" class="s">ubuntu / macOS / Windows · gofmt · vet</text>
+<text x="550" y="566" class="s">go test 30m · race 分片 · Windows 专项 · CLI 构建</text>
+<text x="550" y="582" class="s">PR 和 main 推送都触发</text>
+<!-- callout 1 -->
+<rect class="ci" x="760" y="504" width="260" height="92" rx="8" style="fill:#f0fdf4"/>
+<text x="890" y="526" class="t" style="fill:#15803d">要点①：main 的 CI 不被取消</text>
+<text x="890" y="546" class="s">cancel-in-progress 只在非 main 为真</text>
+<text x="890" y="562" class="s">起因：10-28 main 最近 58 次测试</text>
+<text x="890" y="578" class="s">有 49 次被下一次推送取消</text>
+<path class="e" d="M760 550H720" style="stroke:#15803d" />
+
+<!-- red -->
+<path class="eo" d="M720 575Q760 640 820 650" marker-end="url(#ao)"/>
+<rect class="st" x="820" y="630" width="200" height="50" rx="8"/>
+<text x="920" y="651" class="t" style="font-size:13px">红 → 立刻修或立 issue</text>
+<text x="920" y="668" class="s">不许带红发版</text>
+<path class="ev" d="M1020 655Q1036 655 1036 300Q1036 245 700 245" marker-end="url(#av)"/>
+<text x="1000" y="470" class="l" style="fill:#6d28d9" transform="rotate(90 1000 470)">回到 G2 修</text>
+
+<!-- G6 -->
+<path class="e" d="M550 590V650" marker-end="url(#a)"/>
+<text x="558" y="626" class="l">绿，且跑完未被取消</text>
+<rect class="g" x="400" y="650" width="300" height="62" rx="8"/>
+<text x="550" y="672" class="t">G6 打 tag（agent 会话）</text>
+<text x="550" y="690" class="s">tag 在 main 上 · fetch --tags 找空闲版本号</text>
+<text x="550" y="705" class="s">看 attempt，被取消的不算</text>
+<!-- bypass -->
+<path class="er" d="M450 462Q330 470 330 600Q330 680 400 684" marker-end="url(#ar)"/>
+<rect class="warn" x="286" y="726" width="320" height="76" rx="8"/>
+<text x="446" y="748" class="t" style="fill:#b91c1c">要点②：绿灯是规矩，不是锁</text>
+<text x="446" y="766" class="s">release.yml 只认 tag，不查 Test 结果</text>
+<text x="446" y="782" class="s">11-10：三次没等 CI 就推送并打了 tag</text>
+<text x="446" y="797" class="s">（红色虚线 = 实际被绕过的路径）</text>
+<text x="300" y="560" class="l" style="fill:#b91c1c">跳过 CI</text>
+
+<!-- G7 -->
+<path class="e" d="M700 681Q760 700 760 760V830H700" marker-end="url(#a)"/>
+<rect class="g" x="400" y="822" width="300" height="62" rx="8"/>
+<text x="550" y="844" class="t">G7 release.yml 派发</text>
+<text x="550" y="862" class="s">owner PAT → magpie-releases dispatch</text>
+<text x="550" y="877" class="s">遇限流等重置，最多 65 分钟</text>
+<!-- magpie-releases -->
+<path class="e" d="M700 853H760" marker-end="url(#a)"/>
+<rect class="ext" x="760" y="816" width="260" height="76" rx="8"/>
+<text x="890" y="838" class="t">yetone/magpie-releases</text>
+<text x="890" y="856" class="s">构建 · 签名 · 公证</text>
+<text x="890" y="872" class="s">DeepSeek 写中文发布说明</text>
+<text x="890" y="886" class="s">签名密钥只在这里</text>
+
+<!-- G8 -->
+<path class="e" d="M890 892Q890 960 700 960" marker-end="url(#a)"/>
+<text x="800" y="940" class="l">资产回流</text>
+<rect class="g" x="400" y="926" width="300" height="76" rx="8"/>
+<text x="550" y="948" class="t">G8 等齐 16 个资产</text>
+<text x="550" y="966" class="s">每 30 秒查一次，最多 330 分钟</text>
+<text x="550" y="982" class="s">复制回主仓 · 最高版本才标 Latest</text>
+<text x="550" y="996" class="s">没中文说明 → 在固定 issue 里报</text>
+<rect class="ci" x="736" y="960" width="284" height="56" rx="8" style="fill:#f0fdf4"/>
+<text x="878" y="982" class="t" style="fill:#15803d">要点③：tag → 派发 → 16 资产回流</text>
+<text x="878" y="1002" class="s">tag 不等于发布，16 个资产齐了才算</text>
+
+<!-- users -->
+<path class="e" d="M550 1002V1040" marker-end="url(#a)"/>
+<rect class="n" x="380" y="1040" width="340" height="52" rx="8"/>
+<text x="550" y="1062" class="t">用户</text>
+<text x="550" y="1080" class="s">自更新 · install.sh · 官网，都读 magpie-releases</text>
+
+<!-- loop -->
+<path class="ev" d="M450 450H270" marker-end="url(#av)"/>
+<rect class="lp" x="40" y="466" width="210" height="56" rx="8"/>
+<text x="145" y="488" class="t">复盘 agent</text>
+<text x="145" y="506" class="s">审当天提交（实际滚动进行）</text>
+<path class="ev" d="M145 522V556" marker-end="url(#av)"/>
+<rect class="lp" x="40" y="556" width="210" height="62" rx="8"/>
+<text x="145" y="578" class="t">LESSONS.md</text>
+<text x="145" y="596" class="s">规则 + 证据 + Seen N×</text>
+<text x="145" y="611" class="s">11-11 一天 16 次提交</text>
+<path class="ev" d="M145 618V662" marker-end="url(#av)"/>
+<text x="153" y="644" class="l" style="fill:#6d28d9">不同的 3 天都出现</text>
+<rect class="lp" x="40" y="662" width="210" height="56" rx="8"/>
+<text x="145" y="684" class="t">code-standards.md</text>
+<text x="145" y="702" class="s">规则表 / 验收标准</text>
+<path class="ev" d="M145 718V762" marker-end="url(#av)"/>
+<text x="153" y="744" class="l" style="fill:#6d28d9">一部分再变成</text>
+<rect class="lp" x="40" y="762" width="210" height="56" rx="8"/>
+<text x="145" y="784" class="t">CI 步骤 / guard 测试</text>
+<text x="145" y="802" class="s">gofmt 步、main 不取消…</text>
+<!-- back edges -->
+<path class="ev" d="M250 790Q350 790 370 560Q372 550 380 550" marker-end="url(#av)"/>
+<path class="ev" d="M40 690Q24 690 24 400Q24 245 400 245" marker-end="url(#av)"/>
+<text x="14" y="330" class="l" style="fill:#6d28d9" transform="rotate(-90 14 330)">写代码前必读 → G2</text>
+<text x="270" y="836" class="l" style="fill:#6d28d9">加固 G5</text>
+</svg>
+</div>
+<p style="font-size:13px;color:var(--mute)">左侧紫色区域是复盘环：main 上的提交被复盘 → 写进 LESSONS → 达到阈值升级为标准 → 部分变成机器检查，再虚线回流到写代码（G2）和 CI（G5）。</p>
+</section>
+
+<!-- ================= 2 ================= -->
+<section>
+<h2>2 每道闸门：判据和执行者</h2>
+<table>
+<tr><th style="width:110px">闸门</th><th>判据</th><th style="width:150px">谁执行</th></tr>
+<tr><td>G0 读报告</td><td>读完整个帖子到最后一条（10-13 有人在报告者说“先别做”之后还做了，被 revert）；用报告者的服务商、套餐、agent、界面（GUI/TUI/CLI）复现；测试夹具用报告里的原始字节</td><td>agent 会话</td></tr>
+<tr><td>G1 查危害<br>（仅社区 PR）</td><td>五类风险命中即停审；三种情况直接关闭（见第 4 节）</td><td>agent 查，维护者裁决</td></tr>
+<tr><td>G2 写改动</td><td>code-standards 的“改动包含什么”10 条和“测试”9 条；一个提交一个目标；在自己的 worktree 里干，提交后 <code>git show --stat HEAD</code> 只能有自己的文件</td><td>agent 会话</td></tr>
+<tr><td>G3 本地验收</td><td>六条验收标准；跑了什么、输出什么写进 commit 正文；没跑的必须写“没跑”，不能省略</td><td>写改动的 agent</td></tr>
+<tr><td>G4 合并（PR）</td><td>维护者拉取 head，合到当前 main 上重跑；在 PR 上写明跑了什么、在哪个 head，再用 <code>gh pr merge --match-head-commit &lt;sha&gt;</code>，评审期间有人推送就会挡住合并；Draft 不能合</td><td>维护者（agent）</td></tr>
+<tr><td>G5 CI</td><td>推到 main 和每个 PR 都触发；ubuntu/macOS/Windows 三系统；Linux 上 gofmt；vet；<code>go test -timeout 30m</code>；gateway 的 race 分片；Windows 专项；Linux 和 Android arm64 的纯 CLI 构建；安装脚本和官网测试。main 上的运行不被下一次推送取消</td><td>GitHub Actions</td></tr>
+<tr><td>G6 打 tag</td><td>tag 的提交（或包含它的更新提交）上有一次<b>跑完</b>的绿色 CI，被取消的不算，第二次重跑才绿要看第一次；tag 在 main 上；先 <code>git fetch --tags</code> 找下一个空闲版本号（10-12 两个会话一分钟内给同一个提交打了两个 tag）</td><td>agent 会话<br><span class="tag h">靠自觉，没有机器拦</span></td></tr>
+<tr><td>G7 派发</td><td>推 <code>v*</code> tag 触发；用 owner 的 PAT 向 magpie-releases 发 dispatch；遇到限流就等重置，最多 65 分钟（v0.1.3561 到 3573 曾因限流没发出去）</td><td>GitHub Actions</td></tr>
+<tr><td>G8 算不算发布</td><td>magpie-releases 签名、公证；主仓每 30 秒查一次，最多等 330 分钟，等齐 16 个资产；复制回来，只有比已发布的都高才标 Latest；没有中文说明就在固定 issue 里报一声</td><td>GitHub Actions + magpie-releases</td></tr>
+</table>
+<div class="ok"><b>要点①</b> main 上的 CI 不会被下一次推送取消：test.yml 写的是 <code>cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}</code>，注释引用 LESSONS。原因：10-28 时 main 最近 58 次测试有 49 次被取消，发版等不到一个真正跑完的绿灯。PR 上的仍然会被取消。</div>
+<div class="key"><b>要点②</b> 绿灯是规矩，不是锁：release.yml 只认 tag，不查 Test 的结果。code-standards 要求“发布要满足四条”，LESSONS 也记了 11-10 三个提交“在 CI 跑之前就推送并打了 tag”，并写了“把规则写在这里没能传到那些会话”。这是整套流程最薄的一环。</div>
+<div class="ok"><b>要点③</b> tag 不等于发布：tag → release.yml 派发 → magpie-releases 构建签名公证 → 16 个资产齐 → 复制回主仓并判定 Latest。v0.1.1213、v0.1.1218 打了 tag 却从未发布，第一个 1.5 小时没人发现（#1846）。</div>
+</section>
+
+<!-- ================= 3 ================= -->
+<section>
+<h2>3 LESSONS.md 怎么运作</h2>
+<h3>每条教训的段落结构</h3>
+<ol>
+ <li>一句加粗的规则</li>
+ <li>证据列表：具体提交 hash、issue 号、报告者，以及当时出了什么事</li>
+ <li>常有一条“做对了的样例”（Done right）</li>
+ <li>常有一条“下次怎么查”</li>
+ <li>结尾 <code>- Seen N× (日期, 日期)</code></li>
+</ol>
+<h3>Seen 按天，不按次</h3>
+<p>10-05 “修复要覆盖所有同类”出现了六次，也只算一天。目前文件里 55 条带 Seen 的：43 条 1 次，11 条 2 次，1 条 3 次（规则已在 code-standards）。</p>
+<h3>升级条件</h3>
+<p>文件开头原话：在 3 个或更多<b>不同的天</b>被复盘发现，就移进 code-standards.md。移走后：</p>
+<ul>
+ <li>规则和证据写进 code-standards 的表格或验收标准</li>
+ <li>LESSONS 的“Moved to the code standards”一节留一行，括号里是那几天的日期</li>
+ <li>之后再犯，按日期追加“criteria still missed”，作为证据继续累积</li>
+</ul>
+<h3>“Moved to the code standards”一节列了什么</h3>
+<table>
+<tr><th style="width:80px">升级日</th><th>规则</th></tr>
+<tr><td>10-07</td><td>修复覆盖所有同类；改动要重推依赖它的一切；main 上红的测试是现在就要修的 bug；只合评审过的 head，合并前写清跑了什么</td></tr>
+<tr><td>10-08</td><td>上线前真实使用；GUI 测试两种引擎、窄屏、每种语言</td></tr>
+<tr><td>10-11</td><td>测试启动的东西随测试结束；时间相关测试两头留余量</td></tr>
+<tr><td>10-14</td><td>读取或解析失败等于“未知”；持锁时不做可能阻塞的事；别的应用的值取自那个应用；以保证命名的测试在保证被破坏时必须失败；测试不碰网络；tag 要等绿灯，tag 不等于发布；大提交要有写明跑了什么的正文</td></tr>
+<tr><td>10-18</td><td>magpie 的默认值不覆盖用户自己设的值；checkout 和 worktree 属于创建它的会话</td></tr>
+<tr><td>10-28</td><td>一个提交一个目标；红测试的 issue 要读到最后一条，上面的补丁优先采用；mover 的 min 版本跟上 npm 当天的版本</td></tr>
+</table>
+<h3>再往下一层：规则变成机器检查</h3>
+<div class="chain"><span>一次事故</span><em>→</em><span>LESSONS 教训</span><em>→ 3 个不同的天 →</em><span>code-standards 规则</span><em>→</em><span>CI 步骤 / guard 测试</span></div>
+<p>test.yml 的注释直接引用了这些教训：gofmt 那一步写着“10-01 到 10-06 未格式化文件进了 main 8 次”；main 不取消运行写着“见 LESSONS.md”。</p>
+<h3>节奏</h3>
+<p>设计上叫“夜间复盘”，实际是滚动的：11-11 一天就有 16 次 LESSONS 提交。</p>
+</section>
+
+<!-- ================= 4 ================= -->
+<section>
+<h2>4 社区 PR 的两道关</h2>
+<h3>第一关：先查危害，再评审</h3>
+<p>命中任何一条就停审等维护者，并且在维护者放行前不能在有真实账号的机器上跑它的代码：</p>
+<ol>
+ <li>改了 <code>.github/</code>、发布或发版脚本、Dockerfile、<code>site/</code></li>
+ <li>新增网络地址、上传、遥测，或把凭证、token、cookie、文件发到以前没去过的地方</li>
+ <li>读写目标不需要的凭证文件、钥匙串或 agent 配置</li>
+ <li>新增依赖、go.mod 的 <code>replace</code>、npm 安装脚本、二进制、压缩或编码过的块、运行时拼出来的代码</li>
+ <li>加了中转、转售、推广地址，或维护者已移除的厂商</li>
+</ol>
+<h3>直接关闭、不评审的三种</h3>
+<ul>
+ <li>推翻维护者已裁决的东西（比如逐字节保留的 Codex prompt 文件）</li>
+ <li>因想法被关后原样重提，没有回应关闭理由的新东西</li>
+ <li>几秒内连开的近乎相同的 PR</li>
+</ul>
+<h3>第二关：正常评审</h3>
+<p>按 code-standards 的“评审 PR”清单：亲手跑、故意把它弄坏看测试能不能抓到、去读厂商源码而不是信 PR 的描述、查各平台、走完整条路径。</p>
+<h3>三个名单</h3>
+<table>
+<tr><th style="width:110px">名单</th><th>含义</th></tr>
+<tr><td>封禁</td><td>满足五条之一被提议（3 个以上低价值 PR 且合并率低于 30%、被拒后重提两次、欺骗、机器连发、被拒后重加厂商或广告）。agent 只能提议并写好证据，维护者决定。目前为空</td></tr>
+<tr><td>严格审查</td><td>维护者选择不封禁，但每一行 diff 都读、危害检查全做、在当前 main 上亲自跑、不在开 PR 的同一轮合并。目前有 lunar-me、muzimu217</td></tr>
+<tr><td>观察</td><td>有用但反复出现同样缺口，评审时专门查那几个缺口。目前有 ggbdpq</td></tr>
+</table>
+</section>
+
+<!-- ================= 5 ================= -->
+<section>
+<h2>5 验收六条：哪些机器能校验</h2>
+<table>
+<tr><th style="width:36px">#</th><th style="width:180px">内容</th><th style="width:110px">判定</th><th>说明</th></tr>
+<tr><td>1</td><td>有一个去掉改动就失败的测试</td><td><span class="tag s">半机器</span></td><td>回退再跑可以脚本化，但“失败的是不是它声称的行为”、编译错误和跳过不算，得人判断（10-12、10-13 都有测试在旧代码上照样通过）</td></tr>
+<tr><td>2</td><td>测试在沙箱 HOME 里跑</td><td><span class="tag m">基本机器</span></td><td>testenv 和 TestMain 的标记有 guard 测试，没设就红</td></tr>
+<tr><td>3</td><td>构建和全量测试</td><td><span class="tag m">完全机器</span></td><td>gofmt、vet、build、test 都是命令，CI 也在跑。难点只在人会偷懒跑 <code>-run</code> 或挑包</td></tr>
+<tr><td>4</td><td>GUI 测试两种引擎、每种语言</td><td><span class="tag s">能跑没人强制</span></td><td>Playwright 可以自动，但 CI 不跑这一套，只能本地跑；“这次要不要跑全套”是判断</td></tr>
+<tr><td>5</td><td>尽量真实使用</td><td><span class="tag h">主要靠人</span></td><td>要真实账号、真实厂商回复、Windows 实机；做不到要明说</td></tr>
+<tr><td>6</td><td>UI 规则</td><td><span class="tag s">一半一半</span></td><td><code>t()</code> 和翻译有 i18n-keys 测试，点击不滚动有 click-scroll 测试；不用原生下拉、不用彩色左边框条只能靠评审</td></tr>
+</table>
+</section>
+
+<!-- ================= 6 ================= -->
+<section>
+<h2>6 对“自驱 PM”的启发</h2>
+<p>magpie 的需求入口确实是被动的（issue、Discord、X 上的报告）。它真正“主动”的部分是对<b>自己的工作质量</b>：每天复盘、找出反复出现的错误、升级成规则。</p>
+<p>如果要做自驱 PM，最值得照搬的是这套<b>按“出现天数”升级</b>的阈值设计，只是把对象从“代码错误”换成“外部信号”：</p>
+<div class="chain"><span>外部信号</span><em>→</em><span>信号日志 + Seen 天数</span><em>→ 3 个不同的天 →</em><span>提给你的提案</span><em>→ 你点头 →</em><span>改动</span></div>
+<ul>
+ <li>按天计数，过滤一次性的热闹，留下持续出现的需求</li>
+ <li>每条提案带证据（来源、日期），和 LESSONS 一样可追溯</li>
+ <li>每轮只提 1 到 3 条，小而有用</li>
+</ul>
+</section>
+
+<footer>数据截至 2026-11-12 00:25 +0800。提交数、作者分布、日均与峰值按 git 作者日期（+0800）统计；“约 427 个返工提交”为正则粗估；“为什么没风声”为推断。</footer>
+</main>
+</body>
+</html>
