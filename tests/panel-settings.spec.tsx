@@ -160,3 +160,20 @@ it('runs new Executor Sessions under the agent preset a person picks, and refuse
   await click(zh.save)
   expect(server.settings.executor.agentPreset).toBe('team-reviewer')
 })
+
+it('draws the dispatch pipeline over the settings, lights the step a focused field configures and names where it is', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  const node = (name: string) => document.querySelector<HTMLElement>(`.dt-pipeline-node[data-node="${name}"]`)!
+  expect(node('executor').hasAttribute('data-near')).toBe(true)
+  expect(node('executor').getAttribute('aria-current')).toBeNull()
+  const workers = field<HTMLInputElement>(zh.maxWorkers)
+  await act(async () => { workers.focus() })
+  expect(node('executor').getAttribute('aria-current')).toBe('step')
+  expect(node('main').getAttribute('aria-current')).toBeNull()
+  expect(all('.dt-pipeline-crumb').map(item => item.textContent)).toEqual([zh['pipeline.executor'], zh['term.executor'], zh.maxWorkers])
+  // A step opens the settings that configure it.
+  await click(node('policy'))
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.eval'])
+})

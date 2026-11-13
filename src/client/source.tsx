@@ -64,8 +64,9 @@ function SourceCard({ source }: { source: SourceView }) {
 
 export function SourceSettings({ focus }: { focus?: string }) {
   const { sources } = useSettings().settings
+  const { t } = usePanel()
   useEffect(() => { if (focus) document.getElementById(`dt-source-${focus}`)?.scrollIntoView?.({ block: 'start' }) }, [focus])
-  return <div className="dt-form">
+  return <div className="dt-form" data-pipeline-block="source" data-pipeline-title={t('pipeline.source')}>
     {sources.map(source => <Fragment key={source.id}><SourceCard source={source} />
       {source.id === 'github' && source.installed && <RepositoryTable />}</Fragment>)}
     <ConfigHistory blocks={['source:']} />

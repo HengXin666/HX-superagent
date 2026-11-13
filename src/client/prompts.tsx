@@ -9,7 +9,9 @@ import { useAction, usePanel } from './provider.tsx'
 import { errorText, valueLabel, when, type T } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 import { Button, Icon, Input, SegmentedControl } from './controls.tsx'
-import { PresetSwatch, PromptPresetBar, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
+import { promptNodes, type PipelineNode } from './pipeline.ts'
+import { useReportFocus } from './pipeline-view.tsx'
+import { PresetSwatch, PromptPresetBar, presetHue, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
 
 type Tab = 'edit' | 'full' | 'history'
 type Origin = { revision: number } | 'defaults' | { reset: string }
@@ -78,13 +80,20 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
   onEdit: (next: PromptConfig, note?: PromptNote) => void; marks?: Record<string, PresetRow[]>
 }) {
   const { t } = usePanel()
+  // The map follows the part a person opens, from the list or the stack, before they type in it.
+  const report = useReportFocus()
+  useEffect(() => {
+    const marks = pipelineOf(view, selected, sectionLabel(t, view, selected))
+    report({ nodes: marks['data-pipeline-nodes'].split(',') as PipelineNode[], trail: [marks['data-pipeline-title']] })
+  }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
   const swatches = (section: string) => marks[section]?.length ? <span className="dt-preset-swatches" aria-label={t('promptPresetWrites',
     { names: marks[section]!.map(preset => preset.name).join(t('listSeparator')) })}>{marks[section]!.map(preset => <PresetSwatch
       key={preset.id} preset={preset} />)}</span> : null
   const [name, setName] = useState('')
   const [invalid, setInvalid] = useState(false)
   const item = (section: string, children: ReactNode) => <button key={section} type="button" className="dt-nav-item"
-    aria-current={section === selected ? 'true' : undefined} onClick={() => onSelect(section)}>{children}</button>
+    aria-current={section === selected ? 'true' : undefined} onClick={() => onSelect(section)} {...pipelineOf(view, section,
+      sectionLabel(t, view, section))}>{children}</button>
   const unsaved = (section: string) => changed.includes(section) && <span className="dt-changed-dot" aria-label={t('unsaved')} />
   const add = (event: FormEvent) => {
     event.preventDefault()
@@ -94,7 +103,7 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
     onEdit(withSection(config, section, ''), { selection: section }); onSelect(section)
   }
   const part = isPart(selected) ? view.parts.find(item => item.key === partKey(selected)) : undefined
-  return <div className="dt-prompt">
+  return <><PromptStack config={config} view={view} selected={selected} onSelect={onSelect} marks={marks} /><div className="dt-prompt">
     <nav className="dt-prompt-nav" aria-label={t('promptSections')}>
       <div className="dt-nav-group">{t('promptTeamGroup')}</div>
       {view.sections.map(section => item(section, <>
@@ -118,6 +127,53 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
     </nav>
     {part ? <BuiltInEditor config={config} view={view} part={part} onEdit={onEdit} />
       : <TeamEditor config={config} view={view} selected={selected} onSelect={onSelect} onEdit={onEdit} />}
+  </div></>
+}
+/** The pipeline steps that read a prompt section, as the map's focus tracker reads them from the markup. */
+function pipelineOf(view: PromptsView, section: string, title: string) {
+  const part = isPart(section) ? view.parts.find(item => item.key === partKey(section)) : undefined
+  const roles = part && !part.key.startsWith('skill/') ? part.roles : undefined
+  return { 'data-pipeline-block': 'prompt', 'data-pipeline-nodes': promptNodes(section, roles).join(','), 'data-pipeline-title': title }
+}
+type Role = 'orchestrator' | 'worker'
+/** The parts of a role's prompt in the order its Session reads them, each by the editor's name for it. */
+function roleParts(view: PromptsView, role: Role): string[] {
+  const has = (key: string) => view.parts.some(part => part.key === key)
+  return [`part/runtime/shared`, `part/runtime/${role}`, ...view.sections, 'part/runtime/subscriptions', 'part/runtime/replies',
+    role === 'orchestrator' ? 'part/runtime/dispatch' : 'part/runtime/work', ...role === 'orchestrator' ? ['part/runtime/admission'] : [],
+    `part/runtime/handoff/${role}`, 'part/runtime/environment', ...role === 'orchestrator' ? ['part/runtime/policy'] : []]
+    .filter(name => !isPart(name) || has(partKey(name)))
+}
+/**
+ * Each Session's prompt as a bar of its parts in reading order, each as wide as its text, coloured by who wrote it (built in,
+ * the team, a preset), the part being edited outlined: where the section in the editor sits in what each Session reads.
+ */
+function PromptStack({ config, view, selected, onSelect, marks }: {
+  config: PromptConfig; view: PromptsView; selected: string; onSelect: (name: string) => void; marks: Record<string, PresetRow[]>
+}) {
+  const { t } = usePanel()
+  const size = (name: string) => {
+    const part = isPart(name) ? view.parts.find(item => item.key === partKey(name)) : undefined
+    return Math.max(80, (part ? partText(config, part) : sectionText(config, name) ?? '').length)
+  }
+  const origin = (name: string) => marks[name]?.length ? 'preset' : isPart(name) ? (config.overrides?.[partKey(name)] ? 'team' : 'builtin')
+    : 'team'
+  return <div className="dt-stack" aria-label={t('promptStack')}>
+    {(['orchestrator', 'worker'] as const).map(role => {
+      const names = roleParts(view, role), total = names.reduce((sum, name) => sum + size(name), 0)
+      return <div key={role} className="dt-stack-row">
+        <span className="dt-stack-role">{valueLabel(t, 'promptRole', role)}</span>
+        <div className="dt-stack-bar">{names.map(name => {
+          const preset = marks[name]?.at(-1)
+          return <button key={name} type="button" className="dt-stack-seg" data-origin={origin(name)} aria-current={name === selected || undefined}
+            style={{ flexGrow: size(name) / total, ...preset ? { ['--dt-hue' as string]: presetHue(preset.id) } : {} }}
+            title={`${sectionLabel(t, view, name)} · ${t(`promptOrigin.${origin(name)}`)} · ${size(name)}`} aria-label={sectionLabel(t, view, name)}
+            onClick={() => onSelect(name)} />
+        })}</div>
+      </div>
+    })}
+    <span className="dt-stack-legend">{(['builtin', 'team', 'preset'] as const).map(kind => <span key={kind} className="dt-stack-key"
+      data-origin={kind}>{t(`promptOrigin.${kind}`)}</span>)}</span>
   </div>
 }
 /** Whether an override was edited from a built-in text that has changed since. */
@@ -131,7 +187,7 @@ function TeamEditor({ config, view, selected, onSelect, onEdit }: {
   const { t } = usePanel()
   const text = sectionText(config, selected) ?? ''
   const fallback = sectionText(view.defaults, selected)
-  return <div className="dt-prompt-main">
+  return <div className="dt-prompt-main" {...pipelineOf(view, selected, sectionLabel(t, view, selected))}>
     <div className="dt-subhead"><h3 className="dt-section-title">{sectionLabel(t, view, selected)}</h3>
       <span className="dt-actions">{isSkill(selected)
         ? <Button variant="outline" size="sm" icon={<Icon name="trash" />} onClick={() => { onEdit(withoutSkill(config, selected),
@@ -161,7 +217,7 @@ function BuiltInEditor({ config, view, part, onEdit }: {
   const previous = view.defaultChanged.find(item => item.part === part.key && item.base === base)?.previous
   const readBy = part.key.startsWith('skill/') ? 'promptReadBy.skill' : part.roles.length > 1 ? 'promptReadBy.both'
     : `promptReadBy.${part.roles[0]!}` as const
-  return <div className="dt-prompt-main">
+  return <div className="dt-prompt-main" {...pipelineOf(view, name, sectionLabel(t, view, name))}>
     <div className="dt-subhead"><h3 className="dt-section-title">{sectionLabel(t, view, name)}</h3>
       <span className="dt-actions"><Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={!config.overrides?.[part.key]}
         onClick={reset}>{t('promptResetSection')}</Button></span></div>

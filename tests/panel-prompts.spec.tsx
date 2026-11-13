@@ -275,3 +275,22 @@ it('writes a team preset in the library and saves it against the library\'s revi
   expect(server.promptPresets).toMatchObject({ revision: 1, presets: [{ id: 'release-day', name: 'Release Day', mode: 'append',
     patch: { communication: 'Ship on Fridays.' } }] })
 })
+
+it('lights the steps whose Session reads the prompt part being edited, with its line, and shows where it sits in each prompt', async () => {
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  const node = (name: string) => document.querySelector<HTMLElement>(`.dt-pipeline-node[data-node="${name}"]`)!
+  await click(all('.dt-stack-seg').find(item => item.getAttribute('aria-label') === zh['promptPart.runtime/work'])!)
+  expect(node('executor').getAttribute('aria-current')).toBe('step')
+  expect(node('main').getAttribute('aria-current')).toBeNull()
+  expect(document.querySelector('.dt-stack-seg[aria-current="true"]')?.getAttribute('aria-label')).toBe(zh['promptPart.runtime/work'])
+  const body = field<HTMLTextAreaElement>(zh.promptBody)
+  await act(async () => { body.focus(); body.setSelectionRange(body.value.indexOf('\n') + 1, body.value.indexOf('\n') + 1) })
+  await act(async () => { body.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true })) })
+  expect(all('.dt-pipeline-crumb').at(-1)?.textContent).toBe('L2')
+  // A team section is read by both Sessions.
+  await click(all('.dt-stack-seg').find(item => item.getAttribute('aria-label') === '交付要求')!)
+  expect(document.querySelector('.dt-prompt-main .dt-section-title')?.textContent).toBe('交付要求')
+  await act(async () => { field<HTMLTextAreaElement>(zh.promptBody).focus() })
+  expect([node('main'), node('executor')].map(item => item.getAttribute('aria-current'))).toEqual(['step', 'step'])
+})

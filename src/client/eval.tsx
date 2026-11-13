@@ -78,7 +78,7 @@ function SourcePart({ source, part, saved, dirty, onChange, reload }: {
   const run = useAction(() => call('POST policy-sync/:id', { id: source.id }), { reload })
   // Syncing saves the Policy block, so require unsaved edits to be saved or discarded first.
   const syncNow = () => { if (dirty) notify(t('syncNeedsSave')); else void run.run() }
-  return <div className="dt-part">
+  return <div className="dt-part" data-pipeline-block="admission" data-pipeline-title={`${t('term.policy')} · ${localized(t, source.title)}`}>
     {policy.fields.map(field => <SourceField key={field.key} field={field} value={part[field.key]} saved={saved[field.key]} fact={undefined}
       labels={source.labels}
       onChange={next => onChange({ ...part, [field.key]: next })} />)}
@@ -155,7 +155,7 @@ function PolicyBlock() {
   const part = (id: string) => (policy.sources[id] ?? { allowed: [] }) as Part
   const add = () => insert({ id: crypto.randomUUID(), name: '', enabled: true, instruction: '' }, policy.rules.length)
   return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}
-    onInvalidCapture={event => reveal(event.target)}>
+    onInvalidCapture={event => reveal(event.target)} data-pipeline-block="policy" data-pipeline-title={t('term.policy')}>
     <Fields disabled={draft.busy}>
       <h2 className="dt-block-title">{t('term.policy')}<InfoTip text={t('policyIntro')} /></h2>
       <p className="dt-flow">
@@ -197,7 +197,8 @@ function EvalBlock() {
   const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, timeoutSeconds: numberOf(value.timeoutSeconds) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
-  return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }}>
+  return <form className="dt-form dt-block" onSubmit={event => { void draft.submit(event) }} data-pipeline-block="eval"
+    data-pipeline-title={t('evalSettings')}>
     <Fields disabled={draft.busy}>
       <h2 className="dt-block-title">{t('evalSettings')}<InfoTip text={t('evalIntro')} /></h2>
       <Section title={t('acceptMode')} hint={t(`modeOption.${value.mode}`)}>
