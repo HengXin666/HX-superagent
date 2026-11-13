@@ -5,6 +5,8 @@ import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
 import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { AgentPresetField } from './agent-preset.tsx'
+import { CodeEditor, type CodeEditorHandle } from './code-editor.tsx'
+import { TagInput } from './tag-input.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -81,16 +83,13 @@ export function ExecutionSettings() {
   const executor = blocks.executor.value
   const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
+    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: [...new Set(value.blockedCommands.split(/[\s,]+/).filter(Boolean))] }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
-  const prepare = useRef<HTMLTextAreaElement>(null)
-  const insert = (key: string) => {
-    const field = prepare.current
-    const at = field?.selectionStart ?? value.prepare.length, to = field?.selectionEnd ?? at
-    edit({ prepare: `${value.prepare.slice(0, at)}"$${key}"${value.prepare.slice(to)}` })
-    requestAnimationFrame(() => { field?.focus(); const caret = at + key.length + 3; field?.setSelectionRange(caret, caret) })
-  }
+  const prepare = useRef<CodeEditorHandle>(null)
+  const insert = (key: string) => prepare.current?.insert(`"$${key}"`)
+  const completions = environment.variables.flatMap(group => group.variables.map(variable => ({ key: variable.key,
+    description: firstSentence(localized(t, variable.description)) })))
   return <div className="dt-form">
     <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
       <Fields disabled={draft.busy}>
@@ -113,14 +112,14 @@ export function ExecutionSettings() {
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
-            <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
-              placeholder={t('prepareCommandEmpty')} value={value.prepare}
-              onChange={event => edit({ prepare: event.target.value })} />
+            <CodeEditor ref={prepare} language="shell" label={t('prepareCommand')} minLines={3} maxLength={LIMITS.prepareCommand}
+              placeholder={t('prepareCommandEmpty')} value={value.prepare} variables={completions}
+              onChange={next => edit({ prepare: next })} />
           </Field>
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
-            <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
-              onChange={event => edit({ blockedCommands: event.target.value })} />
+            <TagInput label={t('blockedCommands')} value={value.blockedCommands} placeholder={t('blockedCommandsNone')}
+              pattern={/^[A-Za-z0-9._-]+$/} onChange={blockedCommands => edit({ blockedCommands })} />
           </Field>
         </div>
       </Fields>

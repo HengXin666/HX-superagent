@@ -31,9 +31,10 @@ export function focusOf(target: Element): PipelineFocus | undefined {
   const nodes = (block.dataset.pipelineNodes?.split(',') ?? BLOCK_NODES[block.dataset.pipelineBlock!] ?? []) as PipelineNode[]
   const section = target.closest('.dt-section')?.querySelector('.dt-section-name')
   const field = target.closest('.dt-field, .dt-switch-row')
-  const label = target.getAttribute('aria-label') || text(field?.querySelector('label, .dt-field-head')) || ''
+  const label = target.getAttribute('aria-label') || target.closest('.cm-editor')?.querySelector('[aria-label]')?.getAttribute('aria-label') || text(field?.querySelector('label, .dt-field-head')) || ''
   const trail = [block.dataset.pipelineTitle ?? '', text(section), label].filter((item, index, all) => item && all.indexOf(item) === index)
   if (target instanceof HTMLTextAreaElement) trail.push(`L${lineAt(target.value, target.selectionStart)}`)
+  else { const line = target.closest<HTMLElement>('[data-line]')?.dataset.line; if (line) trail.push(`L${line}`) }
   return { nodes, trail }
 }
 /** Tracks focus within its children, so the map follows the control the person edits. */
