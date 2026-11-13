@@ -72,7 +72,8 @@ const PAGE = 50
 function useThreadTimeline(key: string, target: string | undefined) {
   const { call, notify } = usePanel()
   const [older, setOlder] = useState<Older>()
-  const { data: newest, error, reload } = usePoll(() => call('GET threads/:key', { key, query: { limit: PAGE } }), [key])
+  const { data: newest, error, reload } = usePoll(() => call('GET threads/:key', { key, query: { limit: PAGE } }), [key], undefined,
+    { live: ['thread', 'trigger', 'decision', 'ticket'] })
   const data = newest && mergeTimeline(newest, older)
   const read = (id: string) => !!newest?.timeline.some(item => item.id === id) || !!older?.triggers.some(item => item.id === id)
   const missing = !!target && !!newest && !read(target)

@@ -43,6 +43,8 @@ const SETS: Record<string, Record<string, string>> = {
     AND value ->> '$.ticketId' IS NOT NULL THEN (value ->> '$.ticketId') || ' ' || (value ->> '$.channel.thread') END)` },
 }
 export { SCHEMA_VERSION }
+/** What a Store write touched, as the panel's live feed names it. */
+export type StoreTopic = 'trigger' | 'thread' | 'ticket' | 'decision' | 'outbox' | 'settings' | 'prompts'
 /**
  * SQLite backing store implementing domain `Repositories`, view read queries, versioned settings, outbox receipts, and key-value state.
  * The Runtime opens it after locking the state directory and automatically migrates supported older schemas on startup.
@@ -156,6 +158,30 @@ export class Store implements Repositories {
    * callbacks queued inside a transaction that rolls back are discarded and never run.
    * Use `afterCommit` for immediate in-memory follow-ups to a committed write (such as refreshing health or cancelling an in-memory turn) that cannot wait for the effect queue and need not survive a restart; use `Effects` for durable side effects that must survive a crash.
    */
+  private readonly changeListeners = new Set<(topics: Set<StoreTopic>) => void>()
+  private pendingTopics: Set<StoreTopic> | undefined
+  /**
+   * Calls `listener` with the topics written since its last call, once their writes committed and the current task yields;
+   * the panel's live feed reads them. A write rolled back is not reported.
+   */
+  onChange(listener: (topics: Set<StoreTopic>) => void): () => void {
+    this.changeListeners.add(listener)
+    return () => { this.changeListeners.delete(listener) }
+  }
+  /** Records that a write touched `topic`, to report once it commits. */
+  private touch(topic: StoreTopic): void {
+    if (!this.changeListeners.size) return
+    this.afterCommit(() => {
+      if (!this.pendingTopics) {
+        this.pendingTopics = new Set()
+        queueMicrotask(() => {
+          const topics = this.pendingTopics!; this.pendingTopics = undefined
+          for (const listener of this.changeListeners) { try { listener(topics) } catch (error) { this.report(error) } }
+        })
+      }
+      this.pendingTopics.add(topic)
+    })
+  }
   afterCommit(action: () => void): void {
     if (this.depth) this.committed[this.depth - 1]!.push(action)
     else action()
@@ -167,6 +193,8 @@ export class Store implements Repositories {
   }
   /** Writes a typed KV record under `name`. */
   set<V>(name: Key<V>, value: V): void {
+    if (name.startsWith('prompt-')) this.touch('prompts')
+    else if (name.startsWith('settings-')) this.touch('settings')
     this.db.prepare('INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value))
   }
   /** Deletes the KV record at `name`. */
@@ -203,13 +231,14 @@ export class Store implements Repositories {
     save: (trigger: Trigger): void => this.atomic(() => {
       this.db.prepare('INSERT INTO trigger VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, at=excluded.at').run(trigger.id, JSON.stringify(trigger), trigger.at)
       this.indexThreads(trigger)
+      this.touch('trigger')
     }),
     disposition: (id: string): TriggerDisposition | undefined => { const row = this.db.prepare('SELECT value FROM disposition WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as TriggerDisposition : undefined },
-    saveDisposition: (id: string, value: TriggerDisposition): void => { this.db.prepare('INSERT INTO disposition VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value)) },
+    saveDisposition: (id: string, value: TriggerDisposition): void => { this.touch('trigger'); this.db.prepare('INSERT INTO disposition VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(id, JSON.stringify(value)) },
   }
   readonly threads = {
     get: (keyValue: string): Thread | undefined => { const row = this.db.prepare('SELECT value FROM thread WHERE key=?').get(keyValue); return row ? JSON.parse(String(row.value)) as Thread : undefined },
-    save: (thread: Thread): void => { this.db.prepare('INSERT INTO thread VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(thread.key, JSON.stringify(thread)) },
+    save: (thread: Thread): void => { this.touch('thread'); this.db.prepare('INSERT INTO thread VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(thread.key, JSON.stringify(thread)) },
     list: (): Thread[] => this.db.prepare('SELECT value FROM thread ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as Thread),
     active: (): Thread[] => this.values('SELECT value FROM thread WHERE active = 1 ORDER BY rowid'),
     /** Updates human-facing thread metadata (`label`, `url`, and `facts`, where `null` removes a fact by ID); no-op if the thread does not exist. */
@@ -232,7 +261,7 @@ export class Store implements Repositories {
   }
   readonly tickets = {
     get: (id: string): Ticket | undefined => { const row = this.db.prepare('SELECT value FROM ticket WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Ticket : undefined },
-    save: (ticket: Ticket): void => { this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)) },
+    save: (ticket: Ticket): void => { this.touch('ticket'); this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket)) },
     /** Newest first. */
     list: (): Ticket[] => this.values('SELECT value FROM ticket ORDER BY rowid DESC'),
     /** Newest first. */
@@ -242,7 +271,7 @@ export class Store implements Repositories {
   }
   readonly decisions = {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },
-    save: (decision: Decision): void => { this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
+    save: (decision: Decision): void => { this.touch('decision'); this.db.prepare('INSERT INTO decision VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, thread=excluded.thread').run(decision.id, decision.threadKey, JSON.stringify(decision)) },
     byThread: (threadKeyValue: string): Decision[] => this.db.prepare('SELECT value FROM decision WHERE thread=? ORDER BY rowid').all(threadKeyValue).map(row => JSON.parse(String(row.value)) as Decision),
   }
   /** Read-only queries for management views, orchestrator tools, and source polling (see `storeReads`). */
@@ -265,6 +294,7 @@ export class Store implements Repositories {
      */
     add: (message: OutboundMessage): boolean => {
       const receipt: Receipt = { ...message, status: 'pending' }
+      this.touch('outbox')
       return Number(this.db.prepare('INSERT OR IGNORE INTO outbox (id, value) VALUES (?, ?)').run(message.id, JSON.stringify(receipt)).changes) > 0
     },
     /**
@@ -272,6 +302,7 @@ export class Store implements Repositories {
      * was withdrawn while being sent so its ID cannot be queued again.
      */
     settle: (message: OutboundMessage, outcome: 'sent' | DropReason): void => {
+      this.touch('outbox')
       const settled = outcome === 'sent' ? { status: 'sent' } : { status: 'dropped', dropped: { at: new Date().toISOString(), reason: outcome } }
       const { id, channel, text, kind, ticketId } = message
       const updated = this.db.prepare("UPDATE outbox SET value = json_patch(value, ?) WHERE id = ? AND value ->> '$.status' = 'pending'")
@@ -283,8 +314,10 @@ export class Store implements Repositories {
      * Withdraws a pending message that has not yet been sent.
      * @returns Whether a pending message with `id` was waiting and removed.
      */
-    withdraw: (id: string): boolean =>
-      Number(this.db.prepare("DELETE FROM outbox WHERE id = ? AND value ->> '$.status' = 'pending'").run(id).changes) > 0,
+    withdraw: (id: string): boolean => {
+      this.touch('outbox')
+      return Number(this.db.prepare("DELETE FROM outbox WHERE id = ? AND value ->> '$.status' = 'pending'").run(id).changes) > 0
+    },
   }
 }
 export { key, threadKey }

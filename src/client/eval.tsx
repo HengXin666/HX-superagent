@@ -17,7 +17,7 @@ export function EvalStatus({ filter, window, paused }: { filter: DecisionFilter;
   const { t, call, navigate } = usePanel()
   const [limit, setLimit] = useState(30)
   const { data, error } = usePoll(() => call('GET decisions', { query: { limit, kind: DECISION_KINDS[filter],
-    ...window ? { window } : {} } }), [filter, limit, window])
+    ...window ? { window } : {} } }), [filter, limit, window], undefined, { live: ['decision', 'trigger'] })
   const show = (key: DecisionFilter, last24h: boolean) => navigate({ page: 'eval', query: { ...key === 'work' ? {} : { filter: key },
     ...last24h ? { window: '24h' } : {} } }, true)
   return <>

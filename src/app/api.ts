@@ -9,6 +9,7 @@ import type { InstanceRowInput } from './settings.ts'
 import type { OverviewView } from './views/overview.ts'
 import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
+import type { ConsoleView } from './views/console.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 
@@ -50,6 +51,8 @@ export interface Api {
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
   'POST prompts/preview': { body: PromptConfig; response: ReturnType<Prompts['preview']> }
+  /** The monitoring console: Executor slots and queue, what each Session does now, Sources, outbox, rates and recent events. */
+  'GET console/snapshot': { response: ConsoleView }
   /** The bundle's prompt presets and the team's own, with the revision a save of the team's names. */
   'GET prompt-presets': { response: { revision: number; presets: PromptPresetView[] } }
   /** Replaces the team's own prompt presets (`builtin` ones are not sent); one the configuration turns on cannot go. */
