@@ -5,6 +5,7 @@ import type { AdmissionRowView } from '../sources/kind.ts'
 import { LIMITS } from '../limits.ts'
 import { DECISION_FILTERS, DECISION_KINDS, usePoll, type DecisionFilter, type Settings, type SourceView } from './api.ts'
 import { Button, DisclosureRow, Icon, InfoTip, Input, Pill, SegmentedControl, Switch } from './controls.tsx'
+import { AgentPresetField } from './agent-preset.tsx'
 import { SaveBar } from './draft.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { DecisionLine } from './rows.tsx'
@@ -211,6 +212,8 @@ function EvalBlock() {
       <Section title={t('assessorModel')} hint={t('assessorModelHint')}>
         <ModelField id="dt-eval-model" value={value.model} onChange={model => edit({ model })} />
       </Section>
+      <AgentPresetField role="orchestrator" value={value.agentPreset} saved={block.value.agentPreset}
+        onChange={agentPreset => edit({ agentPreset })} />
     </Fields>
     <SaveBar {...draft} onDiscard={draft.discard} />
   </form>

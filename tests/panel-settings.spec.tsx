@@ -32,7 +32,8 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   const [provider, model] = all('.dt-model input')
   await type(provider as HTMLInputElement, 'worker-provider'); await type(model as HTMLInputElement, 'worker-model')
   await click(zh.save)
-  expect(server.settings.eval).toEqual({ mode: 'auto', timeoutSeconds: 180, model: { provider: 'worker-provider', model: 'worker-model' } })
+  expect(server.settings.eval).toEqual({ mode: 'auto', timeoutSeconds: 180, model: { provider: 'worker-provider', model: 'worker-model' },
+    agentPreset: 'dsh-superagent-router' })
   await click(find(zh['promptPart.runtime/work'], '.dt-settings-link'))
   await type(field<HTMLInputElement>(zh.maxWorkers), '5')
   // An empty root uses the default directory, which the field names instead of looking set.
@@ -55,7 +56,7 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
-      model: 'worker-model', reasoningEffort: 'high' } })
+      model: 'worker-model', reasoningEffort: 'high' }, agentPreset: 'dsh-superagent-worker' })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
     'settings/executor'])
 })
@@ -144,4 +145,18 @@ it('lists the settings groups stages first, opens each stage\'s group from its s
   await remount()
   await click(tab(zh['tab.settings']))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
+})
+
+it('runs new Executor Sessions under the agent preset a person picks, and refuses the router preset for them', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  await settle()
+  const card = (id: string) => (all('.dt-preset-card') as HTMLButtonElement[]).find(item => item.textContent?.includes(id))!
+  expect(card('dsh-superagent-worker').getAttribute('aria-checked')).toBe('true')
+  expect(card('dsh-superagent-router').disabled).toBe(true)
+  await click(card('team-reviewer'))
+  expect(document.querySelector('.dt-preset-field')!.textContent).toContain(zh.agentPresetApplies)
+  await click(zh.save)
+  expect(server.settings.executor.agentPreset).toBe('team-reviewer')
 })

@@ -253,8 +253,8 @@ describe('settings migration', () => {
       paused: true,
       sources: { feishu: feishuSource({ chats: [{ chatId: CHAT, listen: 'mentions' }, { chatId: OBSERVED, listen: 'all' }], directMessages: false }), github: { enabled: true, config: { pollSeconds: 120 } } },
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
-      eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
-      executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' }, agentPreset: 'dsh-superagent-router' },
+      executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [], agentPreset: 'dsh-superagent-worker' },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
