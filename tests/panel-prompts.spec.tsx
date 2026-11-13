@@ -236,3 +236,42 @@ it('loads a version from the history without its overrides of parts this version
   await click(zh.save)
   expect(server.prompts.current.config.overrides).toEqual({ 'runtime/dispatch': dispatch })
 })
+
+it('turns several prompt presets on at once, in the order checked, marks what they write and saves them with the prompts', async () => {
+  server.promptPresets = { revision: 1, presets: [{ id: 'reviewer', name: 'Reviewer', description: 'Ask Dave', mode: 'append',
+    patch: { delivery: 'Ask Dave to review.' } }] }
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  expect(text()).toContain(zh.promptPresetsNone)
+  await click(zh.promptPresetsPick)
+  const option = (name: string) => all('.dt-preset-option').find(item => item.querySelector('.dt-preset-name')?.textContent === name)!
+  await click(option('Hark secretary')); await click(option('Reviewer'))
+  expect(option('Reviewer').querySelector('.dt-preset-check')?.textContent).toBe('2')
+  await click(zh.promptPresetsApply)
+  expect(all('.dt-preset-chip-name').map(item => item.textContent)).toEqual(['Hark secretary', 'Reviewer'])
+  // The sections a preset writes carry its mark in the editor's list.
+  const delivery = all('.dt-prompt-nav .dt-nav-item').find(item => item.textContent?.startsWith('交付要求'))!
+  expect(delivery.querySelectorAll('.dt-preset-swatch')).toHaveLength(2)
+  await click(tab(zh.promptViewFull))
+  expect(text()).toContain('Ask Dave to review.')
+  await click(zh.save)
+  expect(server.prompts.current.config.presets).toEqual(['hark-secretary', 'reviewer'])
+  // A preset the saved configuration turns on cannot be removed from the library.
+  await click(zh.promptPresetsManage)
+  const remove = all('.dt-preset-row').find(item => item.textContent?.includes('Reviewer'))!.querySelector<HTMLButtonElement>(`[aria-label="${zh.removeRow.replace('{name}', 'Reviewer')}"]`)!
+  expect(remove.disabled).toBe(true)
+})
+
+it('writes a team preset in the library and saves it against the library\'s revision', async () => {
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  await click(zh.promptPresetsManage)
+  await click(zh.promptPresetNew)
+  await type(field<HTMLInputElement>(zh.promptPresetName), 'Release Day')
+  expect(field<HTMLInputElement>(zh.promptPresetId).value).toBe('release-day')
+  await type(field<HTMLTextAreaElement>(zh.promptPresetSectionText), 'Ship on Fridays.')
+  await act(async () => { document.querySelector<HTMLFormElement>('.dt-preset-editor')!.requestSubmit() })
+  await settle()
+  expect(server.promptPresets).toMatchObject({ revision: 1, presets: [{ id: 'release-day', name: 'Release Day', mode: 'append',
+    patch: { communication: 'Ship on Fridays.' } }] })
+})
