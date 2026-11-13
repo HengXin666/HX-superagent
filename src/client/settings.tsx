@@ -8,6 +8,7 @@ import { usePanel } from './provider.tsx'
 import { SETTINGS_GROUPS, settingsRoute, type SettingsGroup } from './route.ts'
 import { SettingsProvider } from './settings-kit.tsx'
 import { SourceSettings } from './source.tsx'
+import { FocusTracker, PipelineFocusProvider, PipelineMap } from './pipeline-view.tsx'
 
 const STAGE_GROUPS: readonly SettingsGroup[] = ['source', 'eval', 'execution']
 export function SettingsPage({ group, query, state, deploymentForm }: {
@@ -23,7 +24,11 @@ export function SettingsPage({ group, query, state, deploymentForm }: {
       case 'deployment': return <DeploymentPage setup={state.setup} form={deploymentForm} />
     }
   })()
-  return <div className="dt-settings">
+  const { load, paused } = state
+  const stats = { executor: { value: t('pipelineStat.executor', { running: load.running, max: load.maxWorkers, queued: load.queued }),
+    state: paused ? 'warning' as const : load.running ? 'ongoing' as const : 'idle' as const },
+  }
+  return <PipelineFocusProvider key={group}><div className="dt-settings">
     <nav className="dt-settings-nav" aria-label={t('tab.settings')}>
       {SETTINGS_GROUPS.map(value => <button key={value} type="button" className="dt-settings-link" data-stage={STAGE_GROUPS.includes(value)
         || undefined}
@@ -32,7 +37,8 @@ export function SettingsPage({ group, query, state, deploymentForm }: {
     </nav>
     <div className="dt-settings-body">
       <h2 className="dt-settings-title">{t(`settingsGroup.${group}`)}</h2>
-      {content}
+      {group !== 'deployment' && <PipelineMap current={group} stats={{ executor: stats.executor }} />}
+      <FocusTracker>{content}</FocusTracker>
     </div>
-  </div>
+  </div></PipelineFocusProvider>
 }

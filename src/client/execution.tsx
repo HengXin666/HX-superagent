@@ -94,7 +94,7 @@ export function ExecutionSettings() {
   return <div className="dt-form">
     <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
       <Fields disabled={draft.busy}>
-        <div className="dt-form dt-block">
+        <div className="dt-form dt-block" data-pipeline-block="executor" data-pipeline-title={t('term.executor')}>
           <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField id="dt-worker-model" value={value.model}
             onChange={model => edit({ model })} /></Section>
@@ -105,7 +105,7 @@ export function ExecutionSettings() {
           <AgentPresetField role="worker" value={value.agentPreset} saved={executor.agentPreset}
             onChange={agentPreset => edit({ agentPreset })} />
         </div>
-        <div className="dt-form dt-block">
+        <div className="dt-form dt-block" data-pipeline-block="environment" data-pipeline-title={t('term.environment')}>
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
