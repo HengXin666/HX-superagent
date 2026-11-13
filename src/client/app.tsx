@@ -18,6 +18,7 @@ import { ThreadPage } from './thread.tsx'
 import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
 import { When } from './widgets.tsx'
+import { useLiveStatus } from './live.ts'
 
 export interface AppProps {
   t: T; openSession: (sessionId: string) => Promise<void>
@@ -98,6 +99,16 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
+/** How long search waits after the last keystroke. */
+const SEARCH_SETTLE = 250
+/** Whether the page updates as things happen, reconnects, or polls; hovering says what that means. */
+function LiveIndicator() {
+  const { t } = usePanel()
+  const status = useLiveStatus()
+  return <span className="dt-live" data-status={status} role="status" title={t(`liveHint.${status}`)}>
+    <span className="dt-live-dot" aria-hidden="true" />{t(`live.${status}`)}
+  </span>
+}
 function Header({ masterId }: { masterId: string | undefined }) {
   const { t, call, openSession, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
@@ -113,20 +124,28 @@ function Header({ masterId }: { masterId: string | undefined }) {
     document.addEventListener('pointerdown', close)
     return () => { document.removeEventListener('pointerdown', close) }
   }, [result])
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    const text = query.trim()
+  const run = (value: string) => {
+    const text = value.trim()
     if (!text) { show(); return }
     const request = ++latest.current
-    call('GET search', { query: { q: text } }).then(value => { if (request === latest.current) setResult({ query: text, value }) },
+    call('GET search', { query: { q: text } }).then(found => { if (request === latest.current) setResult({ query: text, value: found }) },
       failure => { if (request === latest.current) notify(errorText(failure)) })
   }
+  // Search as a person types, once they pause; Enter searches at once.
+  const typing = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(typing.current), [])
+  const submit = (event: FormEvent) => { event.preventDefault(); clearTimeout(typing.current); run(query) }
   return <header className="dt-head">
     <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
     <div className="dt-toolbar">
+      <LiveIndicator />
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
-          onChange={event => { setQuery(event.target.value); if (!event.target.value) show() }} />
+          onChange={event => {
+            const value = event.target.value
+            setQuery(value); clearTimeout(typing.current)
+            if (!value.trim()) show(); else if (value.trim().length >= 2) typing.current = setTimeout(() => run(value), SEARCH_SETTLE)
+          }} />
         {result && <SearchResults result={result.value} query={result.query} onClose={() => { show() }} />}
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"

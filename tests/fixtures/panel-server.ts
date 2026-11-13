@@ -91,6 +91,12 @@ export interface PanelServer {
   joinError?: string
   settings: Settings; revisions: Record<string, number>
   prompts: PromptsView
+  /** What each Session does now, as the console reads it, by Session id. */
+  activities: Record<string, ApiResponse<'GET console/snapshot'>['workers'][number]['activity']>
+  /** Tickets waiting for a slot, as the console lists them. */
+  queuedTickets: TicketRow[]
+  /** The live feed a test streams to the panel, when it opens one with `liveFeed()`. */
+  live?: LiveFeed
   /** The team's own prompt presets, as the host stores them. */
   promptPresets: { revision: number; presets: PromptPreset[] }
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
@@ -273,7 +279,7 @@ function initial(): PanelServer {
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
-    promptPresets: { revision: 0, presets: [] },
+    promptPresets: { revision: 0, presets: [] }, activities: {}, queuedTickets: [],
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
@@ -419,6 +425,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
       reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
+  'GET console/snapshot': { answer: () => consoleView() },
   'GET agent-presets': { answer: () => ({ presets: listAgentPresets({ list: () => [{ id: 'team-reviewer', name: 'Team reviewer', description: 'Reads only' }] }),
     selected: { worker: server.settings.executor.agentPreset, orchestrator: server.settings.eval.agentPreset } }) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
@@ -491,6 +498,47 @@ class Reply extends Response {
   override async text() { server.pending--; return super.text() }
 }
 
+/** The console as the host reads it from the fixture's open tickets: t1 works, a queued one waits, the person rows wait on a person. */
+export function consoleView(): ApiResponse<'GET console/snapshot'> {
+  const at = '2026-09-23T00:00:00.000Z'
+  type Slot = ApiResponse<'GET console/snapshot'>['workers'][number]
+  const slot = (row: TicketRow, stage: Slot['stage'], action: Slot['action']): Slot => ({ ticketId: row.id, title: row.title, stage, action,
+    sessionId: row.sessionId ?? `worker-${row.id}`, startedAt: at, report: null, activity: server.activities[row.sessionId ?? ''] ?? null })
+  return { seq: 0, at, paused: server.settings.paused,
+    load: { running: 1, queued: server.queuedTickets.length, maxWorkers: server.settings.executor.maxWorkers },
+    main: { sessionId: 'master', preset: server.settings.eval.agentPreset, mode: server.settings.eval.mode,
+      activity: server.activities.master ?? null },
+    workers: server.tickets.open.map(row => slot(row, 'working', null)),
+    queue: server.queuedTickets.map(row => slot(row, 'working', 'queued')),
+    waiting: server.person.map(row => slot(row, 'person', 'answer')),
+    outbox: { pending: 2 },
+    health: Object.entries(server.health).map(([name, entry]) => ({ name, ...entry })),
+    rates: Array.from({ length: 60 }, (_, index) => ({ minute: new Date(Date.parse(at) - (59 - index) * 60_000).toISOString(),
+      counts: index > 54 ? { trigger: index - 54, ticket: 1 } : {} })),
+    events: [] }
+}
+/** A fake live feed: `send` streams one event to every panel connected; `drop` ends their streams as a restart would. */
+export interface LiveFeed { open(signal?: AbortSignal): Response; send(topic: string, data?: unknown): void; drop(): void; connected(): number }
+export function liveFeed(): LiveFeed {
+  const streams = new Set<ReadableStreamDefaultController<Uint8Array>>()
+  let seq = 0
+  const encoder = new TextEncoder()
+  return {
+    open(signal) {
+      let own: ReadableStreamDefaultController<Uint8Array> | undefined
+      const body = new ReadableStream<Uint8Array>({ start: controller => { own = controller; streams.add(controller) },
+        cancel: () => { if (own) streams.delete(own) } })
+      signal?.addEventListener('abort', () => { if (own) { streams.delete(own); try { own.close() } catch { /* closed */ } } })
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    },
+    send(topic, data) {
+      const event = { seq: ++seq, at: new Date().toISOString(), topic, ...data === undefined ? {} : { data } }
+      for (const stream of streams) stream.enqueue(encoder.encode(`id: ${seq}\nevent: ${topic}\ndata: ${JSON.stringify(event)}\n\n`))
+    },
+    drop() { for (const stream of streams) { try { stream.close() } catch { /* closed */ } } streams.clear() },
+    connected: () => streams.size,
+  }
+}
 export function usePanelServer(cleanup: () => void) {
   beforeEach(() => {
     sessionStorage.clear()
@@ -499,6 +547,8 @@ export function usePanelServer(cleanup: () => void) {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
       const path = address.pathname.replace('/orchestrator/api/', '')
+      // The live feed is a stream a test opens with `server.live`; without one the panel polls, as with a host that has none.
+      if (path === 'events') return server.live ? server.live.open(init?.signal ?? undefined) : new Response(null, { status: 404 })
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })

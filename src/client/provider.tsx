@@ -2,6 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
+import { LiveClient, LiveContext } from './live.ts'
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
@@ -71,11 +72,15 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
+export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', live: liveUrl, children }: {
   t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
+  /** The live feed's address; the panel streams it unless it is `null`. */
+  live?: string | null
   children: ReactNode
 }) {
+  const [live] = useState(() => liveUrl === null ? null : new LiveClient(liveUrl))
+  useEffect(() => { live?.start(); return () => live?.stop() }, [live])
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
@@ -86,7 +91,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   const [restarting, setRestarting] = useState<{ down: boolean }>()
   const [restarts, setRestarts] = useState(0)
   const restart = useCallback(() => setRestarting({ down: false }), [])
-  const { data: state, error, reload } = usePoll(() => call('GET state'), [call], restarting ? 1000 : interval)
+  const { data: state, error, reload } = usePoll(() => call('GET state'), [call], restarting ? 1000 : interval,
+    restarting ? { client: null } : { live: ['ticket', 'settings', 'health'], client: live })
   if (restarting && !!error !== restarting.down) {
     setRestarting(error ? { down: true } : undefined)
     if (!error) setRestarts(restarts + 1)
@@ -100,9 +106,9 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     openSession, notify, restart])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
-  return <Panel.Provider value={context}><PanelState.Provider value={data}>
+  return <Panel.Provider value={context}><PanelState.Provider value={data}><LiveContext.Provider value={live}>
     <style>{STYLES}</style>
     {children}
     {toast && <Toast key={toast.id} text={toast.text} onDone={() => setToast(undefined)} />}
-  </PanelState.Provider></Panel.Provider>
+  </LiveContext.Provider></PanelState.Provider></Panel.Provider>
 }

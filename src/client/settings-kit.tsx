@@ -23,7 +23,7 @@ export function useSettings(): SettingsData {
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const { call } = usePanel()
   const { restarts } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET settings'), [call, restarts])
+  const { data, error, reload } = usePoll(() => call('GET settings'), [call, restarts], undefined, { live: ['settings', 'health'] })
   if (!data) return <LoadState error={error} loading />
   return <SettingsContext.Provider value={{ settings: data, reload }}>
     {error && <LoadState error={error} loading={false} />}

@@ -20,7 +20,7 @@ import { Commands } from '../infra/commands.ts'
 import { instanceOf, repositoryOf, type Deployment, type Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
-import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { DshExecutor, sourceTrigger, ticketOfSession, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -30,6 +30,7 @@ import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
 import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
+import { LiveHub, summarize, toolSummary } from './live.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
@@ -72,6 +73,8 @@ export class Runtime extends Service implements SourceHost {
   readonly engine: Engine
   readonly passes: Passes
   readonly ready: Promise<void>
+  /** The panel's live feed: Store writes by topic and what the agents are doing. */
+  readonly live = new LiveHub()
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
   readonly masterId: string
@@ -220,6 +223,7 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    this.disposers.push(this.store.onChange(topics => { for (const topic of topics) this.live.emit(topic) }), this.watchActivity())
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
@@ -235,10 +239,33 @@ export class Runtime extends Service implements SourceHost {
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
+  /** Feeds what the main Session and the workers do into the live feed: their turns, tool calls and answers. */
+  private watchActivity(): () => void {
+    return this.ctx.on('session/event', (session, sessionEvent) => {
+      const event = sessionEvent as unknown as { type: string; data?: unknown }
+      const ticketId = ticketOfSession(session.id)
+      const role = session.id === this.masterId ? 'orchestrator' as const : ticketId !== undefined ? 'worker' as const : undefined
+      if (!role) return
+      const at = new Date().toISOString(), base = { sessionId: session.id, role, ...ticketId === undefined ? {} : { ticketId }, at }
+      if (event.type === 'turn/start' || event.type === 'turn/end') {
+        const running = event.type === 'turn/start'
+        this.live.activity({ ...base, kind: 'turn', summary: running ? 'turn started' : 'turn ended', state: running ? 'running' : 'idle' })
+        return
+      }
+      if (event.type !== 'assistant/message') return
+      const message = ((event.data ?? {}) as { message?: { content?: { type: string; name?: string; arguments?: string; text?: string }[] } }).message
+      const blocks = message?.content ?? []
+      const calls = blocks.filter(block => block.type === 'tool-call')
+      for (const call of calls) this.live.activity({ ...base, kind: 'tool', tool: call.name ?? '', state: 'running',
+        summary: toolSummary(call.name ?? '', call.arguments ?? '') })
+      const text = blocks.filter(block => block.type === 'text').map(block => block.text ?? '').join(' ')
+      if (!calls.length && text.trim()) this.live.activity({ ...base, kind: 'message', summary: summarize(text), state: 'running' })
+    })
+  }
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, live: this.live,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

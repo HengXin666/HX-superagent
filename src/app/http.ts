@@ -28,6 +28,8 @@ import { settingsView } from './views/settings.ts'
 import { sourcesStatus, type SetupState } from './views/sources.ts'
 import { decisionList, search, threadDetail, threadList } from './views/threads.ts'
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
+import { consoleSnapshot } from './views/console.ts'
+import type { LiveHub } from './live.ts'
 
 export interface HttpHost {
   readonly store: Store
@@ -39,6 +41,8 @@ export interface HttpHost {
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels' | 'saveInstances'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
+  /** The live feed the panel streams (`GET events`) and the console reads. */
+  readonly live: LiveHub
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -235,6 +239,8 @@ function routes(runtime: HttpHost): Routes {
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),
     'POST setup/check': () => { runtime.checkSetup(); return { restarting: true } },
     'GET models': () => runtime.models(),
+    'GET console/snapshot': () => consoleSnapshot({ store, live: runtime.live, health: runtime.health, masterId: runtime.masterId,
+      running: runtime.executor.activeCount() }),
     'GET agent-presets': () => {
       const settings = store.settings()
       return { presets: runtime.sessions.agentPresets(), selected: { worker: settings.executor.agentPreset, orchestrator: settings.eval.agentPreset } }
@@ -251,6 +257,25 @@ function routes(runtime: HttpHost): Routes {
       return runtime.prompts.presets.save(request.presets, request.revision)
     },
   }
+}
+/**
+ * Streams the live feed as server-sent events: first the events after the one the client last read (its `Last-Event-ID`, or
+ * `since`), or `reset` when some of them are gone, then each new one, with a comment every 15 seconds to keep proxies open.
+ */
+export function streamEvents(req: IncomingMessage, res: ServerResponse, live: LiveHub, since: string | null): void {
+  res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no',
+    connection: 'keep-alive', 'x-content-type-options': 'nosniff' })
+  const write = (event: { seq: number; topic: string } & Record<string, unknown>) =>
+    res.write(`id: ${event.seq}\nevent: ${event.topic}\ndata: ${JSON.stringify(event)}\n\n`)
+  const from = Number(req.headers['last-event-id'] ?? since ?? live.last())
+  const backlog = Number.isFinite(from) ? live.since(from) : undefined
+  res.write('retry: 3000\n\n')
+  if (backlog === undefined) write({ seq: live.last(), topic: 'reset' })
+  else for (const event of backlog) write(event as never)
+  const unsubscribe = live.subscribe(event => write(event as never))
+  const ping = setInterval(() => res.write(': ping\n\n'), 15_000)
+  const close = () => { clearInterval(ping); unsubscribe() }
+  req.on('close', close); res.on('error', close)
 }
 function decoded(segment: string): string {
   try { return decodeURIComponent(segment) } catch { throw new RouteError(400, 'A path segment has a malformed escape') }
@@ -284,6 +309,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       if (admitted !== 200) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
+        if (req.method === 'GET' && url.pathname === '/orchestrator/api/events') { streamEvents(req, res, runtime.live, url.searchParams.get('since')); return }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)

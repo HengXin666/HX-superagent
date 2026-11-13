@@ -1,5 +1,6 @@
 /** Same-origin client and polling hook for the orchestrator management API. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { LiveContext, type LiveClient, type LiveTopic } from './live.ts'
 import type { Api, ApiRequest, ApiResponse } from '../app/api.ts'
 import { USER_ERRORS, type UserErrorCode } from '../core/errors.ts'
 import type { TicketStage } from '../core/stage.ts'
@@ -30,12 +31,14 @@ export interface ApiMessages {
 const isUserError = (code: unknown): code is UserErrorCode => typeof code === 'string' && Object.hasOwn(USER_ERRORS, code)
 
 /** Calls one management endpoint; the `x-orchestrator-request` header marks the request as originating from this page. */
-async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
-  } catch {
+    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers },
+      ...signal ? { signal } : {} })
+  } catch (failure) {
+    if (signal?.aborted) throw failure
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }
   const text = await response.text()
@@ -58,13 +61,43 @@ async function api<T>(messages: ApiMessages, path: string, method: string, body?
 }
 
 const HIDDEN_FACTOR = 6
+/** How often a view polls while the live connection is up: only to stay consistent, as the feed says when to reload. */
+export const LIVE_INTERVAL = 60_000
+/** How long a view waits after a live event before it reloads, so a burst of writes reloads it once. */
+const LIVE_SETTLE = 120
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b)
+export interface PollOptions {
+  /** The live feed's topics that change this endpoint's answer; an event of one reloads it at once. */
+  live?: readonly LiveTopic[] | '*'
+  /** The live connection, when the caller is above the panel's own (the panel's state poll). */
+  client?: LiveClient | null
+}
 /**
- * Poll an endpoint while mounted, backing off when the document is hidden.
+ * Poll an endpoint while mounted, backing off when the document is hidden. With `live` topics and the live connection up, it
+ * reloads when one of them changes and polls only every `LIVE_INTERVAL`; while the connection is down it polls at `intervalMs`.
  * Preserves the last successful value across dependency changes and errors, skips state updates when the response is unchanged,
  * and drops stale responses when `deps` or `intervalMs` changes start a new subscription.
  */
-export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], intervalMs = 5000) {
+export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], intervalMs = 5000, options: PollOptions = {}) {
+  const context = useContext(LiveContext)
+  const client = options.client === undefined ? context : options.client
+  const topics = options.live === undefined ? undefined : options.live === '*' ? '*' : options.live.join(',')
+  const [connected, setConnected] = useState(() => !!client && !!topics && client.getStatus() === 'live')
+  useEffect(() => {
+    if (!client || !topics) return
+    const update = () => setConnected(client.getStatus() === 'live')
+    update()
+    return client.onStatus(update)
+  }, [client, topics])
+  useEffect(() => {
+    if (!client || !topics) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const off = client.subscribe(topics === '*' ? '*' : topics.split(','), () => {
+      clearTimeout(timer); timer = setTimeout(() => { void refresh.current() }, LIVE_SETTLE)
+    })
+    return () => { clearTimeout(timer); off() }
+  }, [client, topics])
+  if (connected) intervalMs = Math.max(intervalMs, LIVE_INTERVAL)
   const [state, setState] = useState<{ data?: T; error?: Error }>({})
   const loader = useRef(load)
   loader.current = load
@@ -102,17 +135,19 @@ export type DecisionFilter = typeof DECISION_FILTERS[number]
 export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 'accept,reopen', stop: 'stop', ignore: 'ignore',
   unavailable: 'unavailable', all: '' }
 
-export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>])
-  => Promise<ApiResponse<K>>
+/** A request may carry `signal`, which aborts it, as a newer request makes an older one moot. */
+type Signalled<R> = R & { signal?: AbortSignal }
+export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: Signalled<ApiRequest<K>>]
+  : [request: Signalled<ApiRequest<K>>]) => Promise<ApiResponse<K>>
 /** Build a typed route caller that resolves localized error messages on each request. */
 export function caller(messages: () => ApiMessages): Call {
   return (route, ...[request]) => {
     const [method, pattern] = route.split(' ') as [string, string]
-    const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown }
+    const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown; signal?: AbortSignal }
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    return api(messages(), query ? `${path}?${query}` : path, method, values.body)
+    return api(messages(), query ? `${path}?${query}` : path, method, values.body, values.signal)
   }
 }
 

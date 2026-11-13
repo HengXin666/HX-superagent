@@ -61,7 +61,7 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
 export function OverviewPage() {
   const { t, call, navigate } = usePanel()
   const { setup } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  const { data, error, reload } = usePoll(() => call('GET overview'), [], undefined, { live: ['trigger', 'thread', 'ticket', 'decision', 'outbox', 'settings', 'health'] })
   if (!data) return <LoadState error={error} loading />
   const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
     <span className="dt-stat-label">{label}</span>

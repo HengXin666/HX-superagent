@@ -107,7 +107,7 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
-  const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
+  const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id], undefined, { live: ['ticket', 'outbox', 'activity'] })
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
     title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : <LoadState

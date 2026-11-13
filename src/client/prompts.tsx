@@ -1,5 +1,5 @@
 /** Prompts settings group: section/skill editor, full composed prompt preview with diffing, and revision history. */
-import { Fragment, useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { PromptConfig, PromptsView } from './api.ts'
 import { SaveBar, useDraft, type DraftWords } from './draft.tsx'
@@ -185,6 +185,8 @@ function BuiltInEditor({ config, view, part, onEdit }: {
 
 type Preview = ApiResponse<'POST prompts/preview'>
 type Target = 'orchestrator' | 'worker' | `skill/${string}`
+/** How long the full prompt waits after the last edit before it composes again. */
+const PREVIEW_SETTLE = 400
 const KIND_LABEL = { team: 'promptPartTeam', fixed: 'promptPartFixed', generated: 'promptPartGenerated' } as const
 function FullPrompt({ config, view, dirty, revision, onEdit }: {
   config: PromptConfig; view: PromptsView; dirty: boolean; revision: number; onEdit: (name: string) => void
@@ -195,11 +197,19 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
   // Keep the preview paired with the config it was composed from so diffs stay consistent until the next preview arrives.
   const [preview, setPreview] = useState<{ config: PromptConfig; value: Preview }>()
   const [error, setError] = useState<Error>()
+  const [composing, setComposing] = useState(false)
+  // Compose once a person pauses typing, and drop the request a newer edit makes moot; the first preview is not held back.
+  const first = useRef(true)
   useEffect(() => {
-    let active = true
-    call('POST prompts/preview', { body: config }).then(value => { if (active) { setPreview({ config, value }); setError(undefined) } },
-      (failure: Error) => { if (active) setError(failure) })
-    return () => { active = false }
+    const abort = new AbortController()
+    setComposing(true)
+    const timer = setTimeout(() => {
+      call('POST prompts/preview', { body: config, signal: abort.signal }).then(value => {
+        if (!abort.signal.aborted) { setPreview({ config, value }); setError(undefined); setComposing(false) }
+      }, (failure: Error) => { if (!abort.signal.aborted) { setError(failure); setComposing(false) } })
+    }, first.current ? 0 : PREVIEW_SETTLE)
+    first.current = false
+    return () => { clearTimeout(timer); abort.abort() }
   }, [call, config])
   if (!preview || error) return <LoadState loading error={error} />
   const shown = dirty ? compare : 'default'
@@ -220,6 +230,7 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
       </select>
       <Hint>{t('promptFullState', { count: parts.length, chars: parts.reduce((sum, part) => sum + part.text.length, 0),
         state: dirty ? t('promptPreviewDraft') : t('promptPreviewSaved', { revision }) })}</Hint>
+      <span className="dt-sync" data-busy={composing || undefined} role="status">{t(composing ? 'promptComposing' : 'promptComposed')}</span>
       <SegmentedControl className="dt-segmented dt-compare" label={t('promptCompare')} value={shown} options={[...dirty
         ? [{ value: 'saved' as const, label: t('promptCompareSaved') }] : [], { value: 'default' as const,
           label: t('promptCompareDefault') }]} onChange={setCompare} />
