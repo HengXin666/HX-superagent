@@ -80,10 +80,16 @@ export const PolicyConfigSchema = z.object({
   rules: z.array(RuleSchema).refine(rules => new Set(rules.map(rule => rule.id)).size === rules.length, 'Duplicate rule IDs').default(DEFAULT_RULES),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourcePolicySchema).default({}),
 }).strict()
+/** The bundle's own agent presets (cordis.patch.yml): the defaults a main Session and the Executor Sessions are created with. */
+export const DEFAULT_WORKER_PRESET = 'dsh-superagent-worker', DEFAULT_ROUTER_PRESET = 'dsh-superagent-router'
+/** An agent preset id as DSH's preset registry names it. */
+export const AgentPresetIdSchema = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9@/._:-]+$/, 'Not an agent preset id')
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
   model: RoleModelSchema.nullable().default(null),
+  /** The agent preset a new main Session is created with; one that is not the bundle's router runs under the stricter wait guard. */
+  agentPreset: AgentPresetIdSchema.default(DEFAULT_ROUTER_PRESET),
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
@@ -94,6 +100,8 @@ export const ExecutorConfigSchema = z.object({
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  /** The agent preset a new Executor Session is created with; its tools are still cut down to the work tools it has. */
+  agentPreset: AgentPresetIdSchema.default(DEFAULT_WORKER_PRESET),
 }).strict()
 /** A stored Source instance; `kind` names the Source kind of an extra instance of a multi-instance kind (such as `github-2`), whose id is not the kind. */
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}),

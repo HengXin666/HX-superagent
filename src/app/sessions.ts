@@ -7,6 +7,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
+import { DEFAULT_ROUTER_PRESET, DEFAULT_WORKER_PRESET } from '../policy.ts'
+import { listAgentPresets, type AgentPresetView, type PresetRegistry } from './agent-presets.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -44,14 +46,12 @@ export interface SessionsHost {
  */
 interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
 
-/** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
-export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    /** DSH's agent preset registry selected `agentPreset` for a Session. */
-    'agent-preset/selected'(sessionId: string, agentPreset: string): void
-  }
-}
+/**
+ * The bundle's own agent presets (cordis.patch.yml), the defaults of `executor.agentPreset` and `eval.agentPreset`. A person
+ * may pick another preset for either role in the panel; it applies to Sessions created after the save, as DSH keeps the preset
+ * a Session took its first turn under.
+ */
+export const WORKER_PRESET = DEFAULT_WORKER_PRESET, ROUTER_PRESET = DEFAULT_ROUTER_PRESET
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
@@ -124,9 +124,10 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.host.masterId ? this.presetOf('orchestrator')
+          : ticketId && this.host.store.tickets.get(ticketId) ? this.presetOf('worker') : undefined
         if (!ours || preset === ours || !agent) return
-        const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
+        const presets = child.get('agentPresets') as PresetRegistry
         presets.select(agent, ours).catch(() => {})
       })
     })
@@ -140,9 +141,9 @@ export class Sessions {
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
       const workspace = await ctx.workspaceRegistry.create(cwd)
-      // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
+      // A Session keeps the preset it was created with: the one the settings name for its role (by default the bundle's own).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
+        agentPreset: this.presetOf(role) })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
@@ -152,6 +153,17 @@ export class Sessions {
     ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
+  }
+  /** The agent preset the settings name for `role`'s new Sessions. */
+  presetOf(role: 'orchestrator' | 'worker'): string {
+    const settings = this.host.store.settings()
+    return role === 'worker' ? settings.executor.agentPreset : settings.eval.agentPreset
+  }
+  /** The agent presets DSH's registry offers, with whether each role may run under it. */
+  agentPresets(): AgentPresetView[] {
+    let registry: Partial<PresetRegistry> | undefined
+    try { registry = this.ctx.get('agentPresets') as Partial<PresetRegistry> | undefined } catch { registry = undefined }
+    return listAgentPresets(registry)
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {

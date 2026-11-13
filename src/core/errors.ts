@@ -35,6 +35,8 @@ export const USER_ERRORS = {
   noAnswer: ['refused', 'No worker answer is ready for this human trigger. Wait for the worker\'s report, or request one with orchestrator_ticket_request_status, which acts only on a worker that reported waiting; ordinary progress cannot be relabelled as an answer.'],
   noChannel: ['refused', 'No reply channel for this ticket or trigger'],
   panelOnlyEnvironment: ['refused', 'The execution environment (ticket directory, prepare command, blocked commands) can only be changed in the management panel'],
+  panelOnlyPreset: ['refused', 'The agent presets of the main Session and the Executor Sessions can only be changed in the management panel'],
+  presetIncompatible: ['refused', 'The {role} cannot run under the agent preset {preset}: {reason}'],
   panelOnlyAccounts: ['refused', 'Source fields that setup reads, such as account CLIs, can only be changed in the management panel'],
   setupComplete: ['refused', 'Setup is complete'],
   modelUnavailable: ['refused', 'The {block} model is not available: {error}'],

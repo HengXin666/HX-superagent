@@ -1710,6 +1710,39 @@ it('selects its own preset again for a main Session or worker a person switched 
   await expect(presets.select.mock.results[0]!.value).rejects.toMatchObject({ code: 'agent-preset/locked' })
 })
 
+it('creates an Executor Session under the agent preset the settings name, and selects that one again, not the bundle\'s', async () => {
+  const executor = runtime.store.settings().executor
+  await runtime.settings.save('executor', { ...executor, agentPreset: 'team-worker' }, runtime.store.blockRevision('executor'), 'panel')
+  const { sessionId } = await acceptedTicket()
+  const created = controller.create.mock.calls.map(([options]) => options as { sessionId: string; agentPreset: string })
+  expect(created.find(options => options.sessionId === sessionId)).toMatchObject({ agentPreset: 'team-worker' })
+  const presets = { select: vi.fn(async (_agent: unknown, preset: string) => preset) }
+  services.agentPresets = presets
+  await (await restart()).ready
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent-preset/selected', sessionId, 'standard')
+  await vi.waitFor(() => expect(presets.select).toHaveBeenCalledWith(agents.get(sessionId), 'team-worker'))
+  // A person's own pick that equals the configured preset is left alone.
+  presets.select.mockClear()
+  ;(runtime as unknown as { ctx: Context }).ctx.emit('agent-preset/selected', sessionId, 'team-worker'); await Promise.resolve()
+  expect(presets.select).not.toHaveBeenCalled()
+})
+
+it('changes an agent preset only from the panel, and refuses one the role cannot run under', async () => {
+  const { settings, store } = runtime
+  const executor = store.settings().executor, evaluation = store.settings().eval
+  await expect(settings.save('executor', { ...executor, agentPreset: 'team-worker' }, store.blockRevision('executor'), 'tool'))
+    .rejects.toMatchObject({ code: 'panelOnlyPreset' })
+  await expect(settings.save('executor', { ...executor, agentPreset: 'dsh-superagent-router' }, store.blockRevision('executor'), 'panel'))
+    .rejects.toMatchObject({ code: 'presetIncompatible' })
+  await expect(settings.save('eval', { ...evaluation, agentPreset: 'dsh-superagent-worker' }, store.blockRevision('eval'), 'panel'))
+    .rejects.toMatchObject({ code: 'presetIncompatible' })
+  await settings.save('eval', { ...evaluation, agentPreset: 'team-router' }, store.blockRevision('eval'), 'panel')
+  expect(store.settings().eval.agentPreset).toBe('team-router')
+  // A tool may still save the block when it leaves the preset as it is.
+  await settings.save('eval', { ...store.settings().eval, timeoutSeconds: 90 }, store.blockRevision('eval'), 'tool')
+  expect(store.settings().eval).toMatchObject({ agentPreset: 'team-router', timeoutSeconds: 90 })
+})
+
 it('gives a subagent of a worker only the worker\'s work tools, and none once the ticket ended', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   // DSH creates the subagent under the standard preset, with the worker's Session as its parent.

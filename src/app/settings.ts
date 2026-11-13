@@ -7,6 +7,7 @@ import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, Settings
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
+import { presetCompatibility } from './agent-presets.ts'
 import { resolveRoleModel } from './role-models.ts'
 import { changedPaths, settingsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
@@ -23,6 +24,17 @@ const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
 const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
 
+/**
+ * A role's agent preset may change only from the panel (a prompt-injected tool call could otherwise pick a looser preset), and
+ * only to one the role can run under (`presetCompatibility`).
+ */
+function presetGuard(role: 'orchestrator' | 'worker', current: string, candidate: string, origin: SettingsOrigin): void {
+  if (current === candidate) return
+  if (origin !== 'panel') throw new UserError('panelOnlyPreset')
+  const { compatible, notes } = presetCompatibility(candidate)
+  if (!compatible[role]) throw new UserError('presetIncompatible', { role: role === 'worker' ? 'Executor' : 'main Session', preset: candidate,
+    reason: (role === 'worker' ? notes.worker : notes.orchestrator) ?? '' })
+}
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
   parse(value: unknown, sources: SourceRegistry, id: string): unknown
@@ -37,12 +49,16 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Bl
     },
     merge: (settings, value) => ({ ...settings, policy: value as SettingsValue['policy'] }),
   },
-  eval: { parse: value => EvalConfigSchema.parse(value), merge: (settings, value) => ({ ...settings, eval: value as SettingsValue['eval'] }) },
+  eval: { parse: value => EvalConfigSchema.parse(value), merge: (settings, value) => ({ ...settings, eval: value as SettingsValue['eval'] }),
+    guard: (current, candidate, origin) => presetGuard('orchestrator', current.eval.agentPreset, candidate.eval.agentPreset, origin) },
   executor: {
     parse: value => ExecutorConfigSchema.parse(value),
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
     // Only the management panel may modify shell execution paths or commands.
-    guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+    guard: (current, candidate, origin) => {
+      if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment')
+      presetGuard('worker', current.executor.agentPreset, candidate.executor.agentPreset, origin)
+    },
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),

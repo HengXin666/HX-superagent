@@ -4,6 +4,7 @@ import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
 import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { AgentPresetField } from './agent-preset.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -100,6 +101,8 @@ export function ExecutionSettings() {
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />
           </Field>
+          <AgentPresetField role="worker" value={value.agentPreset} saved={executor.agentPreset}
+            onChange={agentPreset => edit({ agentPreset })} />
         </div>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
