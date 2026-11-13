@@ -9,6 +9,7 @@ import { Button, Icon, Input, Modal, SegmentedControl, Tag } from './controls.ts
 import { useAction, usePanel } from './provider.tsx'
 import { errorText } from './text.ts'
 import { Hint } from './widgets.tsx'
+import { CodeEditor } from './code-editor.tsx'
 
 type Library = ApiResponse<'GET prompt-presets'>
 export type PresetRow = Library['presets'][number]
@@ -252,9 +253,9 @@ function PresetEditor({ editing, taken, busy, onCancel, onSave }: {
     <div className="dt-subtabs" role="tablist" aria-label={t('promptSections')}>{SECTIONS.map(name => <button key={name} type="button"
       role="tab" className="dt-subtab" aria-selected={section === name} onClick={() => setSection(name)}>
       {t(`promptPart.${name}` as never)}{preset.patch[name] ? ' ·' : ''}</button>)}</div>
-    <textarea className="dt-textarea dt-mono dt-preset-text" spellCheck={false} aria-label={t('promptPresetSectionText')}
+    <CodeEditor key={section} className="dt-preset-text" label={t('promptPresetSectionText')} minLines={12}
       placeholder={t('promptPresetSectionEmpty')} value={preset.patch[section] ?? ''}
-      onChange={event => patch({ [section]: event.target.value || undefined })} />
+      onChange={next => patch({ [section]: next || undefined })} />
     {extras > 0 && <Hint>{t('promptPresetExtras', { count: extras })}</Hint>}
     {problem && <p className="dt-error" role="alert">{problem}</p>}
     <div className="dt-actions dt-preset-editor-actions">

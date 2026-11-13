@@ -11,6 +11,7 @@ import { Hint, LoadState } from './widgets.tsx'
 import { Button, Icon, Input, SegmentedControl } from './controls.tsx'
 import { promptNodes, type PipelineNode } from './pipeline.ts'
 import { useReportFocus } from './pipeline-view.tsx'
+import { CodeEditor } from './code-editor.tsx'
 import { PresetSwatch, PromptPresetBar, presetHue, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
 
 type Tab = 'edit' | 'full' | 'history'
@@ -198,8 +199,8 @@ function TeamEditor({ config, view, selected, onSelect, onEdit }: {
         </Button>}
     </span></div>
     <Hint>{t(isSkill(selected) ? 'promptReadBy.skill' : 'promptReadBy.both')}</Hint>
-    <textarea className="dt-textarea dt-mono dt-editor" spellCheck={false} aria-label={t('promptBody')} value={text}
-      onChange={event => onEdit(withSection(config, selected, event.target.value))} />
+    <CodeEditor key={selected} className="dt-editor" label={t('promptBody')} value={text} minLines={18}
+      onChange={next => onEdit(withSection(config, selected, next))} />
   </div>
 }
 /**
@@ -234,8 +235,8 @@ function BuiltInEditor({ config, view, part, onEdit }: {
         <Button variant="outline" size="sm" onClick={reset}>{t('promptTakeDefault')}</Button>
       </span>
     </section>}
-    <textarea className="dt-textarea dt-mono dt-editor" spellCheck={false} aria-label={t('promptBody')} value={partText(config, part)}
-      onChange={event => onEdit(withOverride(config, part, event.target.value))} />
+    <CodeEditor key={part.key} className="dt-editor" label={t('promptBody')} value={partText(config, part)} minLines={18}
+      onChange={next => onEdit(withOverride(config, part, next))} />
   </div>
 }
 

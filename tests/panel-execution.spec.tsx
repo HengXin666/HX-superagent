@@ -125,10 +125,13 @@ it('keeps what a person types in the Execution settings, converting it once on s
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   const blocked = () => field<HTMLInputElement>(zh.blockedCommands), root = () => field<HTMLInputElement>(zh.executionDirectory),
     workers = () => field<HTMLInputElement>(zh.maxWorkers)
-  // A separator typed before the next command, a space inside a path and a cleared number stay as typed.
+  // A separator after a command makes it a chip; a space inside a path and a cleared number stay as typed.
   await type(blocked(), 'gh-personal ')
-  expect(blocked().value).toBe('gh-personal ')
+  expect(blocked().value).toBe('')
+  expect(all('.dt-tag-chip').map(chip => chip.textContent)).toEqual(['gh-personal'])
   await type(blocked(), 'gh-personal, gh-other')
+  expect(all('.dt-tag-chip').map(chip => chip.textContent)).toEqual(['gh-personal'])
+  expect(blocked().value).toBe('gh-other')
   await type(root(), '/srv/my work ')
   expect(root().value).toBe('/srv/my work ')
   await type(workers(), '')
