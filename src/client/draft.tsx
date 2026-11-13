@@ -146,6 +146,14 @@ export function useDraft<V, M = undefined>({ key, saved, revision, save, reload 
     try { if (state.draft) sessionStorage.setItem(key, JSON.stringify(state.draft)); else sessionStorage.removeItem(key) }
     catch (failure) { dispatch({ type: 'refused', notice: { kind: 'unstored', error: errorText(failure) } }) }
   }, [key, state.draft])
+  // A draft lives in this tab's session storage: closing the tab loses it, so the browser asks first.
+  const unsaved = state.draft !== undefined
+  useEffect(() => {
+    if (!unsaved) return
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault() }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [unsaved])
   const failed = (failure: unknown) => dispatch({ type: 'refused', notice: { kind: 'failed', error: errorText(failure) } })
   const submit = async (event?: FormEvent) => {
     event?.preventDefault()

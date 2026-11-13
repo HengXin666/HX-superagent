@@ -38,3 +38,20 @@ it('searches once a person pauses typing, without Enter', async () => {
   expect(server.requests.filter(request => request.path.startsWith('search')).map(request => request.path)).toEqual(['search?q=issue'])
   expect(all('.dt-search-results').length).toBe(1)
 })
+
+it('opens the command palette with ⌘K, filters by what one types and runs the picked command with Enter', async () => {
+  await mount()
+  await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })) })
+  const input = document.querySelector<HTMLInputElement>('.dt-command-input')!
+  expect(input).not.toBeNull()
+  await type(input, '提示词')
+  expect(all('.dt-command-item .dt-command-label').map(item => item.textContent)).toEqual([`${zh['tab.settings']} › ${zh['settingsGroup.prompts']}`])
+  await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+  await settle()
+  expect(document.querySelector('.dt-command-input')).toBeNull()
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.prompts'])
+  await click(zh.commandOpen)
+  await type(document.querySelector<HTMLInputElement>('.dt-command-input')!, zh.commandPause)
+  await click(all('.dt-command-item').find(item => item.textContent?.includes(zh.commandPause))!)
+  expect(server.requests.find(request => request.path === 'executor/pause')?.body).toEqual({ paused: true })
+})

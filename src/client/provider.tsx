@@ -67,8 +67,13 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
   const done = useRef(onDone)
   done.current = onDone
   useEffect(() => { const timer = setTimeout(() => done.current(), holdMs + 1000); return () => clearTimeout(timer) }, [holdMs])
-  return createPortal(<div className="dt-toast" role="status" style={{ ['--dt-toast-hold' as string]: `${holdMs}ms` }}>{text}</div>,
-    document.body)
+  return <div className="dt-toast" role="status" style={{ ['--dt-toast-hold' as string]: `${holdMs}ms` }}>{text}</div>
+}
+/** The toasts on screen, oldest first in the page and newest on top on screen; at most three at once. */
+function Toasts({ toasts, onDone }: { toasts: { text: string; id: number }[]; onDone: (id: number) => void }) {
+  if (!toasts.length) return null
+  return createPortal(<div className="dt-toasts">{toasts.map(toast => <Toast key={toast.id} text={toast.text}
+    onDone={() => onDone(toast.id)} />)}</div>, document.body)
 }
 const stay = () => {}
 const noSession = async () => {}
@@ -85,8 +90,11 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   const copy = useRef(t)
   copy.current = t
   const call = useMemo(() => caller(() => messages(copy.current)), [])
-  const [toast, setToast] = useState<{ text: string; id: number }>()
-  const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
+  const [toasts, setToasts] = useState<{ text: string; id: number }[]>([])
+  const counter = useRef(0)
+  const notify = useCallback((text: string) => setToasts(current => [...current.filter(item => item.text !== text),
+    { text, id: ++counter.current }].slice(-3)), [])
+  const dismiss = useCallback((id: number) => setToasts(current => current.filter(item => item.id !== id)), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
   const [restarting, setRestarting] = useState<{ down: boolean }>()
   const [restarts, setRestarts] = useState(0)
@@ -109,6 +117,6 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   return <Panel.Provider value={context}><PanelState.Provider value={data}><LiveContext.Provider value={live}>
     <style>{STYLES}</style>
     {children}
-    {toast && <Toast key={toast.id} text={toast.text} onDone={() => setToast(undefined)} />}
+    <Toasts toasts={toasts} onDone={dismiss} />
   </LiveContext.Provider></PanelState.Provider></Panel.Provider>
 }

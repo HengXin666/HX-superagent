@@ -20,6 +20,7 @@ import { TriggerStatus } from './trigger.tsx'
 import { When } from './widgets.tsx'
 import { useLiveStatus } from './live.ts'
 import { ConsolePage } from './console.tsx'
+import { CommandPalette } from './command.tsx'
 
 export interface AppProps {
   t: T; openSession: (sessionId: string) => Promise<void>
@@ -140,6 +141,7 @@ function Header({ masterId }: { masterId: string | undefined }) {
     <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
     <div className="dt-toolbar">
       <LiveIndicator />
+      <CommandPalette />
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
           onChange={event => {
