@@ -19,6 +19,7 @@ import { TicketPage } from './ticket.tsx'
 import { TriggerStatus } from './trigger.tsx'
 import { When } from './widgets.tsx'
 import { useLiveStatus } from './live.ts'
+import { ConsolePage } from './console.tsx'
 
 export interface AppProps {
   t: T; openSession: (sessionId: string) => Promise<void>
@@ -167,6 +168,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
     switch (route.page) {
       case 'overview': return <OverviewPage />
       case 'source': return <SourceStatus />
+      case 'console': return <ConsolePage />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
         : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
       case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}

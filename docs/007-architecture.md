@@ -335,6 +335,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/live.ts` | The panel's live connection: streams the feed, reconnects, and reloads the views whose topics changed |
 | `src/client/pipeline.ts` | The dispatch pipeline: its five steps, the settings group of each, and the steps a block or prompt part bears on |
 | `src/client/pipeline-view.tsx` | The pipeline map over the settings and the console, lit where the person is editing, with its trail |
+| `src/client/console.tsx` | The monitoring console: throughput, the pipeline with live counts, a lane per Executor slot and the main Session, the queue, health and the event stream |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
@@ -456,6 +457,8 @@ Outside `src`, nothing is built into `lib`: `scripts/dsh-superagent` is the serv
 | `tests/live.spec.ts` | The live feed: numbering and resuming, activity and rates, redaction, the topics Store writes report, and its event stream |
 | `tests/panel-live.spec.tsx` | The live connection: views reload on their topic, the header's live state, and search as one types |
 | `tests/pipeline.spec.ts` | The dispatch pipeline: every prompt part and settings block reaches a step |
+| `tests/panel-console.spec.tsx` | The monitoring console: lanes per slot and the main Session, the live event log, pausing it and filtering by step |
+| `tests/console.spec.ts` | The console's snapshot: slots, what each Session runs with secrets masked, and the Store writes by topic |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
