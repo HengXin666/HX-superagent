@@ -338,6 +338,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/console.tsx` | The monitoring console: throughput, the pipeline with live counts, a lane per Executor slot and the main Session, the queue, health and the event stream |
 | `src/client/code-editor.tsx` | The code editor on CodeMirror 6, with placeholder and variable marks and $ completion, falling back to a text area |
 | `src/client/tag-input.tsx` | Names typed as chips, kept as one string of space-separated names |
+| `src/client/command.tsx` | The command palette: ⌘K opens a filtered list of pages, settings groups and actions |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
 | `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |

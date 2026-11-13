@@ -108,7 +108,10 @@ export function StageMark({ state, icon, label }: { state: DotState; icon: IconN
 export function LoadState({ error, loading }: { error?: Error | undefined; loading: boolean }) {
   const { t } = usePanel()
   if (error) return <p className="dt-error" role="alert">{error.message}</p>
-  return loading ? <Hint>{t('loading')}</Hint> : null
+  return loading ? <div className="dt-loading" role="status" aria-busy="true">
+    <span className="dt-skeleton dt-skeleton-line" /><span className="dt-skeleton dt-skeleton-line" /><span className="dt-skeleton dt-skeleton-line" />
+    <Hint>{t('loading')}</Hint>
+  </div> : null
 }
 export function LoadMore({ onMore }: { onMore: () => void }) {
   const { t } = usePanel()
