@@ -8,6 +8,7 @@ import { promptsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
 import { Versions } from './versions.ts'
+import { PRESET_ID, PromptPresets, applyPresets, type PromptPreset } from './prompt-presets.ts'
 import { KV } from '../kv.ts'
 
 /** Prompt sections the team writes; the built-in parts follow dsh-superagent's text until the team overrides them. */
@@ -34,7 +35,9 @@ const OverrideSchema = z.object({ text: z.string(),
  */
 export const PromptConfigSchema = z.object({ communication: z.string(), scope: z.string(), delivery: z.string(),
   skills: z.record(SkillNameSchema, z.string()), overrides: z.record(z.string(), OverrideSchema).optional()
-    .describe('Text in place of a built-in part, by its key in prompts/defaults; a part not named follows its built-in text.') }).strict()
+    .describe('Text in place of a built-in part, by its key in prompts/defaults; a part not named follows its built-in text.'),
+  presets: z.array(z.string().regex(PRESET_ID)).max(16).optional()
+    .describe('Prompt presets turned on, applied in this order on top of the sections above; see prompt-presets.') }).strict()
 export type PromptConfig = z.infer<typeof PromptConfigSchema>
 export interface PromptVersion { revision: number; previousRevision: number | null; savedAt: string; source: string; config: PromptConfig;
   /** Original unmigrated config preserved when differences cannot be compared across schema versions. */
@@ -135,19 +138,32 @@ export class PromptConflict extends Error {}
  */
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
+  /** The bundle's prompt presets and the team's own; the current configuration's are in use and cannot be removed. */
+  readonly presets: PromptPresets
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
     private readonly feishu: () => boolean, private readonly hxrouter: () => boolean = () => false) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
+    this.presets = new PromptPresets(store, () => this.current().config.presets ?? [])
+  }
+  /**
+   * The configuration the agents read: `config` with its presets applied in order, and the presets that wrote each section. A
+   * preset removed since a version was saved is skipped.
+   */
+  effective(config: PromptConfig): { config: PromptConfig; sources: Record<string, string[]> } {
+    const presets = (config.presets ?? []).flatMap(id => this.presets.get(id) ?? []) as PromptPreset[]
+    return presets.length ? applyPresets(config, presets) : { config, sources: {} }
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
-  compose(config: PromptConfig, role: Role, variables = this.environment()): string {
+  compose(stored: PromptConfig, role: Role, variables = this.environment()): string {
+    const config = this.effective(stored).config
     return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
   }
   /**
    * Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured, `hxrouter`
    * only while the HX-Email Source is installed and on) followed by team skills.
    */
-  skills(config: PromptConfig): [string, string][] {
+  skills(stored: PromptConfig): [string, string][] {
+    const config = this.effective(stored).config
     return [...this.feishu() ? ['feishu'] : [], 'github', ...this.hxrouter() ? ['hxrouter'] : [], ...Object.keys(config.skills)].map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
@@ -166,7 +182,8 @@ export class Prompts {
    * the built-in text again, and so does one of a part this version no longer has, which the saved version holds.
    */
   validate(value: unknown): PromptConfig {
-    const { overrides, ...config } = PromptConfigSchema.parse(value)
+    const { overrides, presets, ...config } = PromptConfigSchema.parse(value)
+    if (presets) this.presets.resolve(presets)
     const saved = this.current().config.overrides ?? {}
     const kept = Object.entries(overrides ?? {}).flatMap(([name, override]) => {
       const part = builtInPart(name)
@@ -178,7 +195,8 @@ export class Prompts {
       const base = override.base ?? (Object.hasOwn(saved, name) ? saved[name]!.base : undefined) ?? builtInBase(part.text)
       return override.text === part.text ? [] : [[name, { text: override.text, base }] as const]
     })
-    const result: PromptConfig = { ...config, ...kept.length ? { overrides: Object.fromEntries(kept) } : {} }
+    const result: PromptConfig = { ...config, ...kept.length ? { overrides: Object.fromEntries(kept) } : {},
+      ...presets?.length ? { presets: [...new Set(presets)] } : {} }
     const limit = this.maxChars()
     if (JSON.stringify(result).length > limit) throw new UserError('promptTooLong', { limit: String(limit) })
     return result
@@ -197,11 +215,11 @@ export class Prompts {
     })
   }
   preview(value: unknown) {
-    const config = this.validate(value)
+    const { config, sources } = this.effective(this.validate(value))
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
     return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
       parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
-      skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
+      skills: Object.fromEntries(this.skills({ ...config, presets: [] })), presetSources: sources, scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {
     const config = this.validate(value)
@@ -230,7 +248,8 @@ export class Prompts {
       const entries = (value: PromptConfig) => ({ communication: value.communication, scope: value.scope, delivery: value.delivery,
         ...Object.fromEntries(Object.entries(value.skills).map(([name, text]) => ['skill/' + name, text])),
         // An override changes with its text or with the built-in text it was edited from.
-        ...Object.fromEntries(Object.entries(value.overrides ?? {}).map(([part, override]) => [part, JSON.stringify(override)])) })
+        ...Object.fromEntries(Object.entries(value.overrides ?? {}).map(([part, override]) => [part, JSON.stringify(override)])),
+        ...value.presets?.length ? { presets: value.presets.join(',') } : {} })
       const before = previous ? entries(previous) : {}
       const after = entries(config)
       const changed = previous ? [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(name => (before as Record<string, string>)[name] !== (after as Record<string, string>)[name]) : []

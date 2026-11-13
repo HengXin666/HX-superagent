@@ -8,12 +8,12 @@ export const isSkill = (name: string): name is `skill/${string}` => name.startsW
 /** A built-in part, which the editor names `part/<key>`, apart from the team skills (`skill/<name>`). */
 export const isPart = (name: string): name is `part/${string}` => name.startsWith('part/')
 export const partKey = (name: `part/${string}`): string => name.slice(5)
-export const sections = (config: PromptConfig): string[] => [...Object.keys(config).filter(name => name !== 'skills' && name !== 'overrides'),
+export const sections = (config: PromptConfig): string[] => [...Object.keys(config).filter(name => name !== 'skills' && name !== 'overrides' && name !== 'presets'),
   ...Object.keys(config.skills).map(name => `skill/${name}`), ...Object.keys(config.overrides ?? {}).map(key => `part/${key}`)]
 /** Returns a team section or team skill's text, a built-in part's override, or `undefined` for one the team did not write. */
 export const sectionText = (config: PromptConfig, name: string): string | undefined => isPart(name) ? config.overrides?.[partKey(name)]?.text
   : isSkill(name) ? config.skills[name.slice(6)]
-  : name !== 'skills' && name !== 'overrides' && Object.hasOwn(config, name) ? config[name as TeamSection] : undefined
+  : name !== 'skills' && name !== 'overrides' && name !== 'presets' && Object.hasOwn(config, name) ? config[name as TeamSection] : undefined
 /**
  * A configuration with its overrides, none as an empty map, as the editor keeps it: a draft and the version it moves onto then
  * merge override by override, as a host stores no overrides as none. With `parts`, only the overrides of those parts stay, as

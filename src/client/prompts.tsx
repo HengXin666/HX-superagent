@@ -9,6 +9,7 @@ import { useAction, usePanel } from './provider.tsx'
 import { errorText, valueLabel, when, type T } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 import { Button, Icon, Input, SegmentedControl } from './controls.tsx'
+import { PresetSwatch, PromptPresetBar, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
 
 type Tab = 'edit' | 'full' | 'history'
 type Origin = { revision: number } | 'defaults' | { reset: string }
@@ -54,11 +55,16 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
   const tabs = [{ value: 'edit' as const, label: t('promptViewEdit') }, { value: 'full' as const, label: t('promptViewFull') },
     { value: 'history' as const, label: t('promptViewHistory') }]
   const removed = view.defaultChanged.filter(item => item.removed).map(item => item.part)
+  const presets = usePresetLibrary()
+  const marks = presetMarks(config, presets.library)
   return <div className="dt-form">
+    <PromptPresetBar config={config} library={presets.library} error={presets.error} reload={presets.reload}
+      onChange={next => { const { presets: _old, ...rest } = config; edit(next.length ? { ...rest, presets: next } : rest) }} />
     <div className="dt-subtabs" role="tablist" aria-label={t('promptViews')}>{tabs.map(item => <button key={item.value} type="button"
       role="tab" className="dt-subtab" aria-selected={tab === item.value} onClick={() => setTab(item.value)}>{item.label}</button>)}</div>
     {removed.length > 0 && <Hint>{t('promptRemovedParts', { parts: removed.join(t('listSeparator')) })}</Hint>}
-    {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit} />}
+    {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit}
+      marks={marks} />}
     {tab === 'full' && <FullPrompt config={config} view={view} dirty={draft.dirty} revision={draft.revision} onEdit={open} />}
     {tab === 'history' && <PromptHistory key={view.revision} view={view} from={draft.meta?.from}
       onLoad={(next, from) => edit(withOverrides(next, view.parts), { from })} />}
@@ -67,11 +73,14 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
   </div>
 }
 
-function PromptSections({ config, view, changed, selected, onSelect, onEdit }: {
+function PromptSections({ config, view, changed, selected, onSelect, onEdit, marks = {} }: {
   config: PromptConfig; view: PromptsView; changed: string[]; selected: string; onSelect: (name: string) => void
-  onEdit: (next: PromptConfig, note?: PromptNote) => void
+  onEdit: (next: PromptConfig, note?: PromptNote) => void; marks?: Record<string, PresetRow[]>
 }) {
   const { t } = usePanel()
+  const swatches = (section: string) => marks[section]?.length ? <span className="dt-preset-swatches" aria-label={t('promptPresetWrites',
+    { names: marks[section]!.map(preset => preset.name).join(t('listSeparator')) })}>{marks[section]!.map(preset => <PresetSwatch
+      key={preset.id} preset={preset} />)}</span> : null
   const [name, setName] = useState('')
   const [invalid, setInvalid] = useState(false)
   const item = (section: string, children: ReactNode) => <button key={section} type="button" className="dt-nav-item"
@@ -90,16 +99,16 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit }: {
       <div className="dt-nav-group">{t('promptTeamGroup')}</div>
       {view.sections.map(section => item(section, <>
         <span>{sectionLabel(t, view, section)}{config[section] !== view.defaults[section] && <span
-          className="dt-changed-tag">{t('promptChanged')}</span>}{unsaved(section)}</span><small>{t(`promptPartHint.${section}`)}</small>
+          className="dt-changed-tag">{t('promptChanged')}</span>}{unsaved(section)}{swatches(section)}</span><small>{t(`promptPartHint.${section}`)}</small>
       </>))}
       <div className="dt-nav-group">{t('promptBuiltInGroup')}</div>
       {view.parts.map(entry => item(`part/${entry.key}`, <span>{sectionLabel(t, view, `part/${entry.key}`)}
         {config.overrides?.[entry.key] && <span className="dt-changed-tag">{t('promptChanged')}</span>}
         {updated(config, entry) && <span className="dt-changed-tag dt-updated-tag">{t('promptDefaultUpdated')}</span>}
-        {unsaved(`part/${entry.key}`)}</span>))}
+        {unsaved(`part/${entry.key}`)}{swatches(`part/${entry.key}`)}</span>))}
       <div className="dt-nav-group">{t('promptSkillsGroup')}</div>
       {Object.keys(config.skills).map(skill => item(`skill/${skill}`, <span>{sectionLabel(t, view, `skill/${skill}`)}{unsaved(
-        `skill/${skill}`)}</span>))}
+        `skill/${skill}`)}{swatches(`skill/${skill}`)}</span>))}
       <form className="dt-add-skill" onSubmit={add}>
         <Input value={name} placeholder={t('promptSkillName')} aria-label={t('promptAddSkill')} spellCheck={false}
           onChange={event => { setName(event.target.value); setInvalid(false) }} />

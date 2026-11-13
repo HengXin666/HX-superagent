@@ -41,6 +41,17 @@ An override records which built-in text it was based on. Upgrades preserve the t
 
 The main Session can read affected part names in `orchestrator_read prompts`, under `default_changed`.
 
+### Prompt presets
+
+A prompt preset is a named patch of the configuration: team-section text, skills by name and built-in part overrides. The
+configuration turns several on at once (`presets`, in order), and they apply on top of the team's own sections in that order:
+a preset in `append` mode adds its section text after what is there, one in `replace` mode takes the section's place, and
+a later preset's skill or part override takes the place of an earlier one's. The bundle ships read-only presets
+(`hark-secretary`, from `examples/hark-secretary.prompts.json`); a team writes its own in the Prompts settings, saved as one
+list against its revision (`PUT prompt-presets`), and cannot remove one the configuration turns on. Which presets are on, and
+their order, is versioned with the configuration; a preset's own text applies from the next request wherever it is on. The
+preview names the presets that wrote each section (`presetSources`).
+
 ## Assembly and precedence
 
 The system prompt is assembled in this order:

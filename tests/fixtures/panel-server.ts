@@ -7,6 +7,7 @@ import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { listAgentPresets } from '../../src/app/agent-presets.ts'
+import { BUILTIN_PRESETS, PromptPresetSchema, applyPresets, presetView, type PromptPreset } from '../../src/app/prompt-presets.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
   environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
 import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
@@ -90,6 +91,8 @@ export interface PanelServer {
   joinError?: string
   settings: Settings; revisions: Record<string, number>
   prompts: PromptsView
+  /** The team's own prompt presets, as the host stores them. */
+  promptPresets: { revision: number; presets: PromptPreset[] }
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
@@ -270,6 +273,7 @@ function initial(): PanelServer {
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
+    promptPresets: { revision: 0, presets: [] },
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
@@ -433,14 +437,27 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.prompts.current = promptVersion(server.prompts.revision, Object.keys(overrides).length ? { ...config, overrides } : config)
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
-  'POST prompts/preview': { body: true, answer: ({ body }) => {
+  'GET prompt-presets': { answer: () => ({ revision: server.promptPresets.revision,
+    presets: [...BUILTIN_PRESETS, ...server.promptPresets.presets].map(presetView) }) },
+  'PUT prompt-presets': { body: true, answer: ({ body }) => {
+    if (body.revision !== server.promptPresets.revision) return refuse(409, 'Prompt presets changed; reload before saving')
+    const presets = body.presets.map(preset => PromptPresetSchema.parse(preset))
+    const inUse = (server.prompts.current.config.presets ?? []).filter(id => !presets.some(preset => preset.id === id)
+      && !BUILTIN_PRESETS.some(preset => preset.id === id))
+    if (inUse.length) return refuse(400, 'refused', { code: 'promptPresetInUse', values: { presets: inUse.join(', ') } })
+    server.promptPresets = { revision: server.promptPresets.revision + 1, presets }
+    return { revision: server.promptPresets.revision }
+  } },
+  'POST prompts/preview': { body: true, answer: ({ body: stored }) => {
+    const all = [...BUILTIN_PRESETS, ...server.promptPresets.presets]
+    const { config: body, sources } = applyPresets(stored, (stored.presets ?? []).flatMap(id => all.filter(preset => preset.id === id)))
     const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
       composeSkill(body, name)])
     // The generated parts from their templates, without variables or rules.
     const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)
     return { parts: { orchestrator: promptParts(body, 'orchestrator', environment, policy), worker: promptParts(body, 'worker', environment) },
       skills: Object.fromEntries(skills),
-      orchestrator: composePrompt(body, 'orchestrator'), worker: composePrompt(body, 'worker'), scope: '' }
+      orchestrator: composePrompt(body, 'orchestrator'), worker: composePrompt(body, 'worker'), presetSources: sources, scope: '' }
   } },
 }
 
