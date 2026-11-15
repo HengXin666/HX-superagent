@@ -7,9 +7,10 @@ import { z } from 'zod'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { Api, ApiResponse, RouteParams } from '../../src/app/api.ts'
 import { listAgentPresets } from '../../src/app/agent-presets.ts'
+import { AgentOverlays } from '../../src/app/agent-overlays.ts'
 import { BUILTIN_PRESETS, PromptPresetSchema, applyPresets, presetView, type PromptPreset } from '../../src/app/prompt-presets.ts'
 import { SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInPart, builtInParts, composePrompt, composeSkill, defaultPrompts,
-  environmentSection, policySection, promptParts } from '../../src/app/prompts.ts'
+  environmentSection, policySection, promptParts, promptLayers, type PromptLayer } from '../../src/app/prompts.ts'
 import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, SourceStatusRow, SourceView, StateView, ThreadPageView,
   ThreadRow, TicketPageView,
   TicketRow, TicketStage,
@@ -99,6 +100,7 @@ export interface PanelServer {
   live?: LiveFeed
   /** The team's own prompt presets, as the host stores them. */
   promptPresets: { revision: number; presets: PromptPreset[] }
+  overlays: AgentOverlays
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
@@ -279,7 +281,7 @@ function initial(): PanelServer {
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
     settings, revisions: { policy: 3, eval: 1, executor: 0 },
-    promptPresets: { revision: 0, presets: [] }, activities: {}, queuedTickets: [],
+    promptPresets: { revision: 0, presets: [] }, overlays: overlayLibrary(() => server), activities: {}, queuedTickets: [],
     prompts: { masterId: 'master', sections: TEAM_SECTIONS, skillName: SKILL_NAME.source, builtin: ['feishu', 'github'],
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
@@ -428,6 +430,15 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET console/snapshot': { answer: () => consoleView() },
   'GET agent-presets': { answer: () => ({ presets: listAgentPresets({ list: () => [{ id: 'team-reviewer', name: 'Team reviewer', description: 'Reads only' }] }),
     selected: { worker: server.settings.executor.agentPreset, orchestrator: server.settings.eval.agentPreset } }) },
+  'GET agent-overlays': { answer: () => ({ ...server.overlays.view(),
+    selected: { worker: server.settings.executor.overlays ?? [], orchestrator: server.settings.eval.overlays ?? [] } }) },
+  'PUT agent-overlays': { body: true, answer: ({ body }) => {
+    try { return server.overlays.save(body.overlays, body.revision) } catch (error) {
+      const code = (error as { code?: string }).code
+      return code ? refuse(400, 'refused', { code, values: (error as { values: Record<string, string> }).values }) : refuse(409, String(error))
+    }
+  } },
+  'POST agent-overlays/effective': { body: true, answer: ({ body }) => server.overlays.effective(body.role, body.overlays) },
   'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
   'PUT prompts': { body: true, answer: ({ body }) => {
     const { revision } = server.prompts
@@ -457,14 +468,19 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'POST prompts/preview': { body: true, answer: ({ body: stored }) => {
     const all = [...BUILTIN_PRESETS, ...server.promptPresets.presets]
-    const { config: body, sources } = applyPresets(stored, (stored.presets ?? []).flatMap(id => all.filter(preset => preset.id === id)))
+    const presets = (stored.presets ?? []).flatMap(id => all.filter(preset => preset.id === id))
+    const { config: body, sources } = applyPresets(stored, presets)
     const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
       composeSkill(body, name)])
     // The generated parts from their templates, without variables or rules.
     const environment = environmentSection(body, []), policy = policySection(SettingsSchema.parse({ policy: { rules: [] } }), body)
     return { parts: { orchestrator: promptParts(body, 'orchestrator', environment, policy), worker: promptParts(body, 'worker', environment) },
       skills: Object.fromEntries(skills),
-      orchestrator: composePrompt(body, 'orchestrator'), worker: composePrompt(body, 'worker'), presetSources: sources, scope: '' }
+      orchestrator: composePrompt(body, 'orchestrator'), worker: composePrompt(body, 'worker'), presetSources: sources, scope: '',
+      // As the host does: the packs each role turns on add their instructions after the prompt.
+      layers: Object.fromEntries((['orchestrator', 'worker'] as const).map(role => [role, promptLayers(stored, presets, role, environment,
+        role === 'orchestrator' ? policy : undefined, server.overlays.effective(role, (role === 'worker' ? server.settings.executor.overlays
+          : server.settings.eval.overlays) ?? []).instructions, skills as [string, string][])])) as { orchestrator: PromptLayer[]; worker: PromptLayer[] } }
   } },
 }
 
@@ -589,4 +605,11 @@ export function fakeForm(writable = true, accept = true) {
   }
   const publish = (patch: Partial<ConfigFormSnapshot<Record<string, unknown>>>) => { snapshot = { ...snapshot, ...patch }; notify() }
   return { form, mutations, publish }
+}
+
+/** A capability pack library over memory, reading the roles' packs from the fake server's settings. */
+function overlayLibrary(server: () => { settings: { executor: { overlays?: string[] }; eval: { overlays?: string[] } } }): AgentOverlays {
+  const values = new Map<string, unknown>()
+  return new AgentOverlays({ get: (key: string) => values.get(key) as never, set: (key: string, value: unknown) => { values.set(key, value) } } as never,
+    () => ({ worker: server().settings.executor.overlays ?? [], orchestrator: server().settings.eval.overlays ?? [] }))
 }

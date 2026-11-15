@@ -1,7 +1,7 @@
 /** The dispatch pipeline the panel draws: every settings block and every prompt part reaches at least one step. */
 import { expect, it } from 'vitest'
 import { builtInParts } from '../src/app/prompts.ts'
-import { BLOCK_NODES, EDGES, PIPELINE, STEPS, groupNodes, lineAt, promptNodes } from '../src/client/pipeline.ts'
+import { BLOCK_NODES, EDGES, PIPELINE, STEPS, groupNodes, impactOf, lineAt, promptNodes } from '../src/client/pipeline.ts'
 import { SETTINGS_GROUPS } from '../src/client/route.ts'
 
 it('maps every built-in prompt part to the steps of the roles that read it, and a team section to both Sessions', () => {
@@ -19,4 +19,11 @@ it('opens a settings group from every step but deployment\'s, and names a step f
   expect(Object.values(STEPS).map(step => step.id)).toEqual([...PIPELINE])
   expect(EDGES.every(edge => PIPELINE.includes(edge.from) && PIPELINE.includes(edge.to))).toBe(true)
   expect(lineAt('a\nb\nc', 3)).toBe(2)
+})
+
+it('names the steps a change reaches downstream, along forward edges only', () => {
+  expect(impactOf(['source'])).toEqual(['policy', 'main', 'executor', 'reply'])
+  expect(impactOf(['executor'])).toEqual(['reply'])
+  expect(impactOf(['main', 'executor'])).toEqual(['reply'])
+  expect(impactOf(['reply'])).toEqual([])
 })

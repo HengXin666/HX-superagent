@@ -1,18 +1,25 @@
 /** Shared list rows for Tickets, Threads, and Decisions, plus Source fact chips and automated-message run folding. */
 import { useState } from 'react'
 import type { DecisionRow, ThreadFacts, ThreadRow, TicketRow } from './api.ts'
-import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { useAction, usePanel } from './provider.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
 import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
+import { Badge, Button, Icon, Tag } from './ui/index.ts'
 
 export function TicketLine({ ticket, question, onChanged, context }: {
   ticket: TicketRow; question?: boolean; onChanged?: () => Promise<void>; context?: boolean
 }) {
-  const { t, call, navigate } = usePanel()
+  const { t, call, navigate, notify } = usePanel()
   const status = ticketMark(t, ticket)
-  const after = async (request: Promise<unknown>) => { await request; await onChanged?.() }
+  // The row answers at once: its Stop or Retry gives way to what is happening until the list reloads, or comes back on a failure.
+  const [pending, setPending] = useState<'stop' | 'retry'>()
+  const after = async (request: Promise<unknown>, kind: 'stop' | 'retry') => {
+    setPending(kind)
+    try { await request; await onChanged?.() } finally { setPending(undefined) }
+  }
+  const retry = useAction(async () => { await after(call('POST tickets/:id/retry', { id: ticket.id }), 'retry'); notify(t('retryStarted')) })
+  const actions = pending ? { ...ticket.actions, stop: false, retry: false } : ticket.actions
   const note = question && ticket.note && { ...ticket.note, text: readableMarkers(t, ticket.note.text) }
   const answer = ticket.reply && ticket.stage === 'person' && ticket.action === 'answer' ? ticket.reply : undefined
   return <li className="dt-row dt-link dt-ticket" data-state={question ? status.dot : undefined}>
@@ -31,13 +38,14 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       <div className="dt-ticket-actions">{onChanged && <>
         {answer && <ActionLink href={answer.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source',
           answer.source) })}</ActionLink>}
-        {ticket.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
-          message={t('retryConfirm', { title: ticket.title })}
-          onConfirm={() => after(call('POST tickets/:id/retry', { id: ticket.id }))} />}
-        {ticket.actions.retry && ticket.sessionId && <SessionButton variant="outline" sessionId={ticket.sessionId} />}
-        {ticket.actions.stop && <ConfirmButton variant="outline" icon="stop" label={t('stop')} title={t('stopConfirmTitle')}
+        {/* Retrying harms nothing, so it runs at once; stopping cannot be undone, so it asks first. */}
+        {actions.retry && <Button variant="secondary" size="sm" icon={<Icon name="refresh" size={14} />} busy={retry.busy}
+          onClick={() => { void retry.run() }}>{t('retry')}</Button>}
+        {actions.retry && ticket.sessionId && <SessionButton variant="secondary" sessionId={ticket.sessionId} />}
+        {pending && <Badge tone="info" dot>{t(pending === 'stop' ? 'ticketStopping' : 'ticketRetrying')}</Badge>}
+        {actions.stop && <ConfirmButton danger variant="secondary" icon="stop" label={t('stop')} title={t('stopConfirmTitle')}
           message={t('stopConfirm', { title: ticket.title })}
-          onConfirm={() => after(call('POST tickets/:id/stop', { id: ticket.id }))} />}
+          onConfirm={() => after(call('POST tickets/:id/stop', { id: ticket.id }), 'stop')} />}
       </>}</div>
     </div>
   </li>

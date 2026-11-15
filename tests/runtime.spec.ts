@@ -1566,6 +1566,16 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])
 })
 
+it('gives a worker the tools its capability packs grant where DSH has registered them, and keeps what they take away out', async () => {
+  runtime.sessions.overlays.save([{ id: 'docs', name: 'Docs', description: '', roles: ['worker'], deny: ['web_search'],
+    allow: ['feishu_doc_edit', 'mcp__nowhere__search'], instructions: '' }], 0)
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, overlays: ['docs'] } })
+  const { sessionId } = await acceptedTicket()
+  // The granted tool DSH knows joins the work tools; the one it does not know is left out rather than named to DSH.
+  expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'skill',
+    'feishu_doc_edit'] }])
+})
+
 it('gives an explicit ticket\'s worker a prompt without the limits of an inferred Mandate', async () => {
   const { sessionId } = await acceptedTicket()
   await runtime.idle()
@@ -1677,6 +1687,18 @@ it('creates an Executor Session under the bundle\'s worker preset, and the main 
   const created = controller.create.mock.calls.map(([options]) => options as { sessionId: string; agentPreset: string })
   expect(created.find(options => options.sessionId === sessionId)).toMatchObject({ agentPreset: 'dsh-superagent-worker' })
   expect(created.find(options => options.sessionId === runtime.masterId)).toMatchObject({ agentPreset: 'dsh-superagent-router' })
+})
+
+it('creates an Executor Session under the base its last capability pack names, and keeps the setting\'s when that base is refused', async () => {
+  runtime.sessions.overlays.save([{ id: 'review', name: 'Review', description: '', roles: ['worker'], deny: [], allow: [], instructions: '', base: 'reviewer' },
+    { id: 'routed', name: 'Routed', description: '', roles: ['worker'], deny: [], allow: [], instructions: '', base: 'dsh-superagent-router' }], 0)
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, overlays: ['review'] } })
+  expect(runtime.sessions.presetOf('worker')).toBe('reviewer')
+  const { sessionId } = await acceptedTicket()
+  const created = controller.create.mock.calls.map(([options]) => options as { sessionId: string; agentPreset: string })
+  expect(created.find(options => options.sessionId === sessionId)).toMatchObject({ agentPreset: 'reviewer' })
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, overlays: ['review', 'routed'] } })
+  expect(runtime.sessions.presetOf('worker')).toBe('dsh-superagent-worker')
 })
 
 it('selects its own preset again for a main Session or worker a person switched before its first turn, and not after it', async () => {

@@ -258,3 +258,39 @@ describe('hark secretary example prompt configuration', () => {
     expect(composePrompt(config, 'worker')).not.toContain('人设')
   })
 })
+
+describe('prompt layers', () => {
+  const presets = [
+    { id: 'tone', name: 'Tone', description: '', mode: 'append' as const, patch: { communication: 'Be brief.', skills: { release: 'Tag on Fridays.' } } },
+    { id: 'gate', name: 'Gate', description: '', mode: 'append' as const, patch: { scope: 'Only the ticket.', overrides: { 'runtime/replies': { text: '## replies\nShort.' } } } },
+  ]
+  const config: PromptConfig = { ...defaultPrompts(), communication: 'Say little.', scope: '', delivery: 'Attach screenshots.', skills: { notes: 'Keep notes.' },
+    overrides: { 'runtime/work': { text: '## work\nTeam work.' } } }
+  it('splits each section by who wrote it, in reading order, and its prompt layers join to the composed prompt', async () => {
+    const { applyPresets } = await import('../src/app/prompt-presets.ts')
+    const { promptLayers } = await import('../src/app/prompts.ts')
+    for (const role of ['orchestrator', 'worker'] as const) {
+      const layers = promptLayers(config, presets, role, 'env')
+      const prompt = layers.filter(layer => layer.group === 'prompt').map(layer => layer.text).join('\n\n')
+      expect(prompt).toBe(composePrompt(applyPresets(config, presets).config, role, 'env'))
+      expect(layers.every(layer => layer.chars === layer.text.length)).toBe(true)
+    }
+    const layers = promptLayers(config, presets, 'worker', 'env', undefined, [{ id: 'careful', name: 'Careful', text: 'Small diffs.' }],
+      [['github', 'gh skill'], ['release', 'Tag on Fridays.'], ['notes', 'Keep notes.']])
+    const pick = (id: string) => layers.find(layer => layer.id === id)
+    expect(pick('communication#0')).toMatchObject({ origin: 'team', section: 'communication', text: '## Communication\nSay little.' })
+    expect(pick('communication#1')).toMatchObject({ origin: 'preset', by: 'tone', section: 'preset:tone:communication', text: 'Be brief.' })
+    // A section the team left empty is the preset's alone, heading included.
+    expect(pick('scope#0')).toMatchObject({ origin: 'preset', by: 'gate', text: '## Ticket scope\nOnly the ticket.' })
+    expect(pick('runtime/shared')).toMatchObject({ origin: 'builtin', section: 'part/runtime/shared' })
+    expect(pick('runtime/work')).toMatchObject({ origin: 'team', section: 'part/runtime/work' })
+    expect(pick('runtime/replies')).toMatchObject({ origin: 'preset', by: 'gate', section: 'part/runtime/replies' })
+    expect(pick('runtime/environment')).toMatchObject({ generated: true })
+    expect(pick('pack:careful')).toMatchObject({ group: 'packs', origin: 'pack', text: '## Capability packs\n\n### Careful\nSmall diffs.' })
+    expect(layers.filter(layer => layer.group === 'skills').map(layer => [layer.section, layer.origin])).toEqual([
+      ['part/skill/github', 'builtin'], ['preset:tone:skill/release', 'preset'], ['skill/notes', 'team']])
+    // A replacing preset leaves the section to itself.
+    const replaced = promptLayers(config, [{ ...presets[0]!, mode: 'replace' as const }], 'worker')
+    expect(replaced.filter(layer => layer.id.startsWith('communication#')).map(layer => layer.origin)).toEqual(['preset'])
+  })
+})

@@ -27,7 +27,7 @@ export function consoleSnapshot({ store, live, health, masterId, running }: Cons
     queue: queued, waiting: open.filter(item => item.stage === 'person'),
     outbox: { pending: store.receipts.waiting().length },
     health: Object.entries(health).map(([name, entry]) => ({ name, ...entry })),
-    rates: live.rates(60), events: live.recent(150),
+    rates: live.rates(60), events: live.recent(600),
   }
 }
 export type ConsoleView = ReturnType<typeof consoleSnapshot>

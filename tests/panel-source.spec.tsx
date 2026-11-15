@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at, choices } from './fixtures/panel.tsx'
 import { server, problemOf, droppedReply } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -25,14 +25,14 @@ it('shows each Source\'s state on the Source status and opens its settings from 
   expect(all('.dt-card')[1]!.textContent).toContain('部署检查未通过：没有设置智能体的 GitHub CLI。')
 })
 
-it('folds more than six chats into a line of their names', async () => {
+it('folds more than six chats into a count and their first names', async () => {
   const chats = Array.from({ length: 7 }, (_, n) => ({ chatId: n ? `oc_c${n}` : 'oc_team', listen: 'all' as const }))
   server.settings.sources.feishu = { ...server.settings.sources.feishu!, config: { ...server.settings.sources.feishu!.config, chats } }
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   const summary = all('.dt-card')[0]!.querySelector('.dt-rows-summary')!
-  expect(summary.textContent).toBe(['团队群', 'oc_c1', 'oc_c2', 'oc_c3', 'oc_c4', 'oc_c5', 'oc_c6'].join('、'))
+  expect(summary.textContent).toBe(`共 7 项：${['团队群', 'oc_c1', 'oc_c2'].join('、')}… 展开`)
 })
 
 it('rereads the chats the bot has joined on request and says which are new, keeping unsaved edits', async () => {
@@ -45,15 +45,15 @@ it('rereads the chats the bot has joined on request and says which are new, keep
   server.joining = { oc_new: '新群' }
   await click(button())
   expect(server.requests.find(request => request.path === 'sources/feishu/labels')).toMatchObject({ method: 'POST' })
-  expect(document.querySelector('.dt-toast')?.textContent).toBe('列表已更新，新增：新群')
+  expect(document.querySelector('.hx-toast-title')?.textContent).toBe('列表已更新，新增：新群')
   // The row being added stays, and now offers the new chat.
-  const pick = feishu().querySelectorAll('.dt-rows-item')[1]!.querySelector<HTMLSelectElement>('select[aria-label="选择机器人已加入的群"]')!
-  expect([...pick.options].map(option => option.textContent)).toEqual(['选择机器人已加入的群', '另一个群', '新群'])
+  const pick = feishu().querySelectorAll('.dt-rows-item')[1]!.querySelector('.dt-select[aria-label="选择机器人已加入的群"]')!
+  expect(await choices(pick)).toEqual(['另一个群', '新群'])
   await click(button())
-  expect([...document.querySelectorAll('.dt-toast')].at(-1)?.textContent).toBe(zh.labelsCurrent)
+  expect([...document.querySelectorAll('.hx-toast-title')].at(-1)?.textContent).toBe(zh.labelsCurrent)
   server.joinError = 'lark-cli: token expired'
   await click(button())
-  expect([...document.querySelectorAll('.dt-toast')].at(-1)?.textContent).toBe('读取失败，列表保持不变：lark-cli: token expired')
+  expect([...document.querySelectorAll('.hx-toast-title')].at(-1)?.textContent).toBe('读取失败，列表保持不变：lark-cli: token expired')
   expect(button().disabled).toBe(false)
   // Only a field whose key column offers a refresh shows the button.
   expect([...all('.dt-card')[1]!.querySelectorAll('button')].some(item => item.textContent === '刷新群列表')).toBe(false)
@@ -71,11 +71,12 @@ it('renders each Source\'s settings from its kind\'s fields and saves one Source
   const rows = feishu.querySelectorAll('.dt-rows-item')
   // A saved chat shows its name; a row being added picks from the joined chats not yet configured.
   expect(rows[0]!.querySelector('.dt-row-label')?.textContent).toBe('团队群')
-  expect(rows[0]!.querySelector('select[aria-label="选择机器人已加入的群"]')).toBeNull()
-  const pick = rows[1]!.querySelector<HTMLSelectElement>('select[aria-label="选择机器人已加入的群"]')!
-  expect([...pick.options].map(option => option.textContent)).toEqual(['选择机器人已加入的群', '另一个群'])
+  expect(rows[0]!.querySelector('.dt-select[aria-label="选择机器人已加入的群"]')).toBeNull()
+  const pick = rows[1]!.querySelector('.dt-select[aria-label="选择机器人已加入的群"]')!
+  expect(pick.textContent).toBe('选择机器人已加入的群')
+  expect(await choices(pick)).toEqual(['另一个群'])
   await type(pick, 'oc_other')
-  await type(rows[1]!.querySelector('select[aria-label="接收"]')!, 'all')
+  await type(rows[1]!.querySelector('.dt-select[aria-label="接收"]')!, 'all')
   await click('接收私聊')
   await act(async () => { feishu.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) }); await settle()
   expect(server.requests.find(request => request.path === 'settings/source:feishu')).toMatchObject({ method: 'PUT', body: { revision: 0,
@@ -98,7 +99,9 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   await click(tab(zh['tab.settings']))
   const github = all('.dt-card')[1]!
   expect(github.textContent).toContain('当前账号 @agent-bot')
-  const labels = () => [...github.querySelectorAll('label')].map(label => label.textContent)
+  // The fields a person types into; a switch row's label names its switch.
+  const labels = () => [...github.querySelectorAll('label')].filter(label => label.control?.getAttribute('role') !== 'switch')
+    .map(label => label.textContent)
   expect(labels()).toEqual(['监听的仓库', '智能体的 GitHub CLI'])
   expect(field<HTMLInputElement>('监听的仓库').value).toBe('acme/widgets')
   // A fact describes the saved value, so an edited CLI shows none until it is saved.
@@ -117,7 +120,7 @@ it('shows the account each CLI signs in as, and keeps a saved CLI on screen whil
   // The saved value stays, and the card's fields are disabled, until the saved revision returns with the restarted dsh-superagent.
   expect(field<HTMLInputElement>('智能体的 GitHub CLI').value).toBe('/opt/bin/gh-agent')
   expect(field('智能体的 GitHub CLI').matches(':disabled')).toBe(true)
-  expect(sessionStorage.getItem('dsh-superagent/draft/master/source:github')).toBeNull()
+  expect(sessionStorage.getItem('dsh-superagent/draft/source:github')).toBeNull()
 })
 
 it('points a setup problem at the settings that fix it', async () => {
@@ -178,7 +181,7 @@ it('leaves Feishu out of a GitHub-only deployment', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
   await click(tab(zh.promptViewFull))
-  expect([...field<HTMLSelectElement>(zh.promptPreviewTarget).options].map(option => option.textContent)).toEqual(['主 Session',
+  expect(await choices(field(zh.promptPreviewTarget))).toEqual(['主 Session',
     '执行器 Session', 'dsh-superagent-github'])
 })
 
@@ -243,13 +246,16 @@ it('lists the messages a Source did not send in the last day under it, newest fi
   const disclosure = (scope: Element) =>
     [...scope.querySelectorAll<HTMLElement>('[data-disclosure-row]')].find(row => row.textContent?.includes(zh.sourceDroppedTitle))!
   await click(disclosure(feishu!))
-  const rows = [...feishu!.querySelectorAll('.dt-disclosure-body .dt-row')].map(row => [row.querySelector('.dt-row-title')?.textContent,
-    row.querySelector('.dt-tag')?.textContent, row.querySelector('button')?.textContent])
+  // A table: the message, where it belongs, why it was not sent and when.
+  const rows = [...feishu!.querySelectorAll('.dt-disclosure-body tbody tr')].map(row => [row.querySelector('td')?.textContent,
+    row.querySelectorAll('td')[2]?.textContent, row.querySelector('button')?.textContent])
   expect(rows).toEqual([['Reply m3', zh['reason.channelGone'], '修复回归'],
     ['Reply m2', zh['reason.channelIgnored'], zh['term.thread']], ['Reply m1', zh['reason.channelGone'], undefined]])
   expect(github!.textContent).toContain(`${zh.sourceDroppedTitle} 1`)
   await click(find('修复回归', '.dt-disclosure-body button'))
-  expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
+  // The Ticket opens in the drawer over the Source page.
+  expect(document.querySelector('[data-drawer-route]')?.getAttribute('data-drawer-route')).toBe('execution:t1')
+  expect(tab(zh['tab.source']).getAttribute('aria-selected')).toBe('true')
   await remount()
   await click(zh['tab.source'])
   await click(disclosure(document.body))
@@ -286,6 +292,15 @@ it('reads the settings again as soon as dsh-superagent answers after a save rest
 })
 
 it('adds repositories to the GitHub Source in bulk, saves them as instances, and removes one', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  onTestFinished(() => { vi.useRealTimers() })
+  // The save restarts dsh-superagent: DSH answers with empty 404s, then it answers again.
+  const restarted = async () => {
+    server.down = true
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) }); await settle()
+    server.down = false
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) }); await settle()
+  }
   await mount()
   await click(zh['tab.source'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
@@ -297,7 +312,11 @@ it('adds repositories to the GitHub Source in bulk, saves them as instances, and
   // The default repository and unreadable entries stay out of the table.
   expect([...table().querySelectorAll<HTMLInputElement>('input.dt-mono, .dt-mono input')].map(input => input.value)).toEqual(['acme/gadgets', 'acme/tools'])
   expect(table().textContent).toContain('读不出仓库：nope')
+  // The list is a draft like any settings block: kept in this tab's session storage until it is saved.
+  expect(Object.keys(sessionStorage).some(key => key.endsWith('/instances:github'))).toBe(true)
   await click([...table().querySelectorAll('button')].find(item => item.textContent === zh.repositoriesSave)!)
+  await restarted()
+  expect(Object.keys(sessionStorage).some(key => key.endsWith('/instances:github'))).toBe(false)
   const saved = server.requests.find(request => request.path === 'sources/github/instances')
   expect(saved).toMatchObject({ method: 'PUT', body: { revision: 0, rows: [{ enabled: true, config: { repository: 'acme/gadgets' }, policyFrom: 'github' },
     { enabled: true, config: { repository: 'acme/tools' }, policyFrom: 'github' }] } })
@@ -309,6 +328,7 @@ it('adds repositories to the GitHub Source in bulk, saves them as instances, and
   const remove = [...table().querySelectorAll('button')].find(item => item.getAttribute('aria-label') === '移除：acme/tools')!
   await click(remove)
   await click([...table().querySelectorAll('button')].find(item => item.textContent === zh.repositoriesSave)!)
+  await restarted()
   expect(server.settings.sources['github-3']).toBeUndefined()
   expect(server.settings.sources['github-2']).toBeDefined()
 })

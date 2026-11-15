@@ -326,7 +326,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
+| `src/app/agent-overlays.ts` | Capability packs: team-defined layers a role turns on several of, in order, over its agent preset; tools they take away, instructions they add, and which sets a role cannot run under |
 | `src/app/agent-presets.ts` | The agent presets the main Session and the Executor Sessions may run under: the registry's list and which role may take each |
+| `src/client/agent-overlays.tsx` | The capability pack bar of a role: the chain, picker, library and editor, and the role's effective tools drawn live |
 | `src/client/agent-preset.tsx` | The agent preset picker of the main Session and the Executor: one radio card per preset DSH offers |
 | `src/app/prompt-presets.ts` | Prompt presets: the bundle's and the team's named patches of the prompt configuration, applied in order on top of the team's sections |
 | `src/client/prompt-presets.tsx` | The prompt preset bar and library: several presets turned on in order, reordered, and the team's own written, imported and exported |
@@ -334,10 +336,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/console.ts` | The monitoring console's snapshot: Executor slots and queue, each Session's activity, Sources, outbox and rates |
 | `src/client/live.ts` | The panel's live connection: streams the feed, reconnects, and reloads the views whose topics changed |
 | `src/client/pipeline.ts` | The dispatch pipeline: its five steps, the settings group of each, and the steps a block or prompt part bears on |
+| `src/client/swimlanes.ts` | The console's time axis: lanes per Ticket and the main Session from the live feed, with the stretches a slot worked and the tool calls as ticks |
 | `src/client/pipeline-view.tsx` | The pipeline map over the settings and the console, lit where the person is editing, with its trail |
 | `src/client/console.tsx` | The monitoring console: throughput, the pipeline with live counts, a lane per Executor slot and the main Session, the queue, health and the event stream |
 | `src/client/code-editor.tsx` | The code editor on CodeMirror 6, with placeholder and variable marks and $ completion, falling back to a text area |
 | `src/client/tag-input.tsx` | Names typed as chips, kept as one string of space-separated names |
+| `src/client/actions.tsx` | Actions offered in more than one place, defined once: pause with Undo, and a removal deferred behind its Undo |
 | `src/client/command.tsx` | The command palette: ⌘K opens a filtered list of pages, settings groups and actions |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
@@ -398,20 +402,23 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/hxrouter-read.ts` | The `hxrouter/` reads of a Trigger's session thread and parent, and `hxrouterThreadContext` |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
+| `src/client/architecture.ts` | The components under each step of the architecture map, read from the saved settings: Source instances, Policy, each role's model, preset, packs, prompt and environment |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/filtered.tsx` | What the Sources kept out: the filtered and dropped tables of a Source and the overview's drawer over them |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/repositories.tsx` | The GitHub Source's repository table: rows, bulk paste and the instances save |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
-| `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
+| `src/client/presets.tsx` | The Presets settings: each role's stack in one place, its agent preset as the base, its capability packs in order, and the prompt presets both roles share |
+| `src/client/prompt-assembly.tsx` | The prompt assembly view: one role's final prompt as a vertical stack of layers in reading order, as wide as their text and coloured by who wrote them, and the editors of a preset's or a pack's layer |
+| `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Assembly, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
 | `src/client/deployment.tsx` | The Deployment settings, also shown in DeepSeek Harness's Plugin Manager |
 | `src/client/draft.tsx` | Settings drafts: `draftReducer`, their states and their merge with a newer saved revision, `saveBarText`, the save bar's line, and the save bar |
-| `src/client/controls.tsx` | Local copies of DeepSeek Harness's controls, which follow its markup, keyboard behaviour and design tokens, since the bundle does not import `@deepseek-ai/dsh-client-ui-primitives`; they read no context |
 | `src/client/widgets.tsx` | The small components the pages share, which read the panel's context: sections, page heads, load states, times, links, confirmed actions, the setup check and Markdown |
 | `src/client/rows.tsx` | The rows the pages share: a Ticket, a Thread and a Decision, a Thread's chip, and the folding of runs of automated messages |
 | `src/client/markdown.ts` | The Markdown subset of reports and questions, and the bare addresses in messages, as blocks and inline parts |
@@ -419,6 +426,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
+| `src/client/ui/index.ts`, `README.md` | The panel's component library, the only place pages take controls from (the bundle imports no `@deepseek-ai/dsh-client-ui-primitives`, and reads no context here), and its usage notes; the design language is written up in `docs/010-design-language.md` |
+| `src/client/ui/button.tsx`, `field.tsx`, `toggle-group.tsx`, `select.tsx`, `multiselect.tsx`, `basic.tsx`, `tabs.tsx` | Buttons and icon buttons, inputs and the form atoms every control reads (the field context, label, note, error, adornment, group field), the radio and checkbox groups, Select and Combobox, the ordered MultiSelect with drag and keyboard reordering, Switch, Badge, Kbd, Card, KeyValue, Skeleton, EmptyState and SaveBar, and Tabs |
+| `src/client/ui/overlay.tsx`, `toast.tsx`, `datatable.tsx` | Modal, ConfirmDialog, the right-side Drawer, Popover and Tooltip; the toast provider; the DataTable with sorting, filtering and windowed rows |
+| `src/client/ui/status.tsx`, `choice-group.tsx`, `disclosure.tsx`, `infotip.tsx` | State dots and the in-progress spinner; page tabs, filter pills, toggle pills and the segmented radio group; the disclosure row; the help or warning tip beside a label |
+| `src/client/ui/hooks.ts`, `util.ts`, `icon.tsx`, `ui.css`, `theme.css`, `tokens.css` | `useDraft`, `useOptimistic` and `useSaveShortcut`; focus trapping, floating placement and list stepping; the icon set; the components' stylesheet, which reads only component tokens; the theme, the only reader of the host's `--dsw-alias-*` tokens, which maps them to the semantic colors `--hx-c-*` with a light and a dark fallback palette and derives every tint from them; the tokens, the semantic scale `--hx-ui-*` (space, radius, borders, type, motion, layers, focus, shadows) and the component tokens `--hx-<component>-*` built on it |
 
 `src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/hxrouter.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./hxrouter-watch`. The bundle's `cordis.patch.yml` inserts the four plugins, with Feishu disabled.
 
@@ -452,16 +464,22 @@ Outside `src`, nothing is built into `lib`: `scripts/dsh-superagent` is the serv
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/built-panel.spec.tsx` | The built `lib/client.js` in real React against the fake panel server: every page and settings group renders, the map draws preset layers and the base, the console timeline draws bars |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
+| `tests/agent-overlays.spec.ts` | Capability packs: effective tools in order, the sets a role refuses, the library's save rules, and the settings that turn them on |
 | `tests/agent-presets.spec.ts` | The agent presets offered to each role, their defaults, and a registry that cannot list |
 | `tests/prompt-presets.spec.ts` | Prompt presets applied in order, the team's own saved against a revision, and a configuration turning them on |
 | `tests/live.spec.ts` | The live feed: numbering and resuming, activity and rates, redaction, the topics Store writes report, and its event stream |
 | `tests/panel-live.spec.tsx` | The live connection: views reload on their topic, the header's live state, and search as one types |
+| `tests/realtime.spec.ts` | Realtime event sources: health changes reach the live feed once per real change and batch, removed settings and prompts report, and executor steps keep their Assignment |
+| `tests/panel-realtime.spec.tsx` | The panel's shared data layer: one read per address in flight, optimistic actions that roll back when refused, health reloads, and how old the data is off live |
 | `tests/pipeline.spec.ts` | The dispatch pipeline: every prompt part and settings block reaches a step |
+| `tests/swimlanes.spec.ts` | The console's time axis: bars open and close with Assignments, clip to the window, and lanes order by recent activity |
 | `tests/panel-console.spec.tsx` | The monitoring console: lanes per slot and the main Session, the live event log, pausing it and filtering by step |
 | `tests/console.spec.ts` | The console's snapshot: slots, what each Session runs with secrets masked, and the Store writes by topic |
+| `tests/console-verdict.spec.ts` | The console's one-line verdict: what blocks the dispatch, what waits for a person and what runs, worst first |
 | `tests/code-editor.spec.tsx` | The code editor on CodeMirror and its text-area fallback, and the tag input's chips |
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
@@ -477,7 +495,12 @@ Outside `src`, nothing is built into `lib`: `scripts/dsh-superagent` is the serv
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
-| `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
+| `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet and its one focus ring |
+| `tests/tokens.spec.ts` | The style guard: host tokens read only in the theme, tokens declared only in the token sheets and built layer on layer, every token read is defined and every component token is read, and no color, length, duration, weight or color mix written down in a stylesheet or a component |
+| `tests/ui.spec.tsx` | The component library: keyboard behaviour, focus return, sorting and windowing, optimistic rollback and live drafts, and its stylesheet's classes and colors |
+| `tests/form.spec.tsx` | The form atoms: how a field wires its label, note, error and state into every kind of control, group fields, the radio and checkbox groups, the pipeline map's names from field labels, and that no page builds field markup by hand |
+| `tests/a11y.spec.tsx` | axe-core over every page, every settings group and the command palette: zero critical and zero serious violations (contrast is left to the screenshot pass) |
+| `tests/keyboard.spec.tsx` | Keyboard-only acceptance with `tests/fixtures/keyboard.ts`: page tabs, a Ticket opened and closed from the list with focus returned, the command palette, a setting changed and saved, and no trap or unreachable control on any page |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
@@ -499,4 +522,5 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | `outbox` | The receipt of each message for a Channel, by id, with the Ticket it is for and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped message, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, which holds its attempts | The Outbox |
 | `kv` | Every other record, by key | The part that names it |
 
+A generated column is computed from its row's JSON and is empty outside its set, and each has an index over its set, so a pass reads only active work. A database that predates a column gets it when the S
 A generated column is computed from its row's JSON and is empty outside its set, and each has an index over its set, so a pass reads only active work. A database that predates a column gets it when the S

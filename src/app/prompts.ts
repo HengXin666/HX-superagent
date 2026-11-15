@@ -125,6 +125,65 @@ export function composeSkill(config: PromptConfig, name: string): string {
   return name === 'feishu' || name === 'github' || name === 'hxrouter' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
 }
 
+/**
+ * One layer of a role's final prompt as the assembly view draws it, in reading order: who wrote it (`origin`: built in, the
+ * team, a prompt preset, a capability pack), `by` the preset or pack, `section` the editor's name for what it edits
+ * (`communication`, `part/<key>`, `skill/<name>`), and the exact text it adds. The prompt's layers joined by a blank line are
+ * the composed prompt; the packs' layers follow it; skills are registered beside it and read by name.
+ */
+export interface PromptLayer {
+  id: string; group: 'prompt' | 'packs' | 'skills'; section: string
+  origin: 'builtin' | 'team' | 'preset' | 'pack'; by?: string; generated?: true; chars: number; text: string
+}
+/**
+ * The layers of `role`'s prompt from the team's own configuration and the presets it turns on, in order, so a section a preset
+ * appends to splits into the team's text and each preset's; then the capability packs' instructions, then the skills.
+ */
+export function promptLayers(stored: PromptConfig, presets: readonly PromptPreset[], role: Role, environment?: string,
+  policy?: { key: string; text: string }, packs: readonly { id: string; name: string; text: string }[] = [],
+  skills: readonly [string, string][] = []): PromptLayer[] {
+  const { config } = applyPresets(stored, presets)
+  const layer = (value: Omit<PromptLayer, 'chars'>): PromptLayer => ({ ...value, chars: value.text.length })
+  // The last preset that writes a part or a skill decides its text, else the team's own, else the built-in one.
+  const writer = (find: (preset: PromptPreset) => boolean, team: boolean) => {
+    const by = [...presets].reverse().find(find)
+    return by ? { origin: 'preset' as const, by: by.id } : { origin: team ? 'team' as const : 'builtin' as const }
+  }
+  const layers: PromptLayer[] = []
+  for (const part of promptParts(config, role, environment, policy)) {
+    if (part.kind === 'team') {
+      const name = part.name as TeamSection
+      // The pieces of a team section, as `applyPresets` writes it: the team's text, then each preset's, joined by a blank line.
+      let pieces: { origin: 'team' | 'preset'; by?: string; text: string }[] = stored[name] ? [{ origin: 'team', text: stored[name] }] : []
+      for (const preset of presets) {
+        const text = preset.patch[name]
+        if (text === undefined || text === '') continue
+        const piece = { origin: 'preset' as const, by: preset.id, text }
+        pieces = preset.mode === 'replace' || !pieces.map(item => item.text).join('\n\n').trim() ? [piece] : [...pieces, piece]
+      }
+      pieces.forEach((piece, index) => layers.push(layer({ id: `${name}#${index}`, group: 'prompt',
+        section: piece.origin === 'team' ? name : `preset:${piece.by!}:${name}`, origin: piece.origin, ...piece.by ? { by: piece.by } : {},
+        text: index ? piece.text : `${part.heading}\n${piece.text}` })))
+      continue
+    }
+    const key = part.key
+    layers.push(layer({ id: key, group: 'prompt', section: `part/${key}`,
+      ...writer(preset => !!preset.patch.overrides && Object.hasOwn(preset.patch.overrides, key), !!stored.overrides && Object.hasOwn(stored.overrides, key)),
+      ...part.kind === 'generated' ? { generated: true as const } : {}, text: part.text }))
+  }
+  packs.forEach((pack, index) => layers.push(layer({ id: `pack:${pack.id}`, group: 'packs', section: `pack:${pack.id}`, origin: 'pack',
+    by: pack.id, text: `${index ? '' : '## Capability packs\n\n'}### ${pack.name}\n${pack.text}` })))
+  for (const [name, text] of skills) {
+    const bundled = Object.hasOwn(sourceSkills, name)
+    const who = bundled
+      ? writer(preset => !!preset.patch.overrides && Object.hasOwn(preset.patch.overrides, `skill/${name}`), !!stored.overrides && Object.hasOwn(stored.overrides, `skill/${name}`))
+      : writer(preset => !!preset.patch.skills && Object.hasOwn(preset.patch.skills, name), true)
+    const section = who.origin === 'preset' ? `preset:${who.by}:skill/${name}` : bundled ? `part/skill/${name}` : `skill/${name}`
+    layers.push(layer({ id: `skill:${name}`, group: 'skills', section, ...who, text }))
+  }
+  return layers
+}
+
 /** An override whose built-in text changed since its `base`, with that text when kept, or whose part this version no longer has. */
 export interface DefaultChange { part: string; base?: string; previous?: string; removed?: true }
 /**
@@ -214,12 +273,21 @@ export class Prompts {
       return [{ part, base, ...previous === undefined ? {} : { previous } }]
     })
   }
-  preview(value: unknown) {
-    const { config, sources } = this.effective(this.validate(value))
+  /**
+   * Compose a draft as each role would read it, with its parts, its skills and, for the assembly view, its layers; `packs` are
+   * the capability packs' instructions each role's Sessions add after the prompt.
+   */
+  preview(value: unknown, packs: Partial<Record<Role, readonly { id: string; name: string; text: string }[]>> = {}) {
+    const stored = this.validate(value)
+    const { config, sources } = this.effective(stored)
+    const presets = (stored.presets ?? []).flatMap(id => this.presets.get(id) ?? [])
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
+    const skills = this.skills({ ...config, presets: [] })
     return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
       parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
-      skills: Object.fromEntries(this.skills({ ...config, presets: [] })), presetSources: sources, scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
+      skills: Object.fromEntries(skills), presetSources: sources,
+      layers: { orchestrator: promptLayers(stored, presets, 'orchestrator', environment, policy, packs.orchestrator, skills),
+        worker: promptLayers(stored, presets, 'worker', environment, undefined, packs.worker, skills) }, scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {
     const config = this.validate(value)

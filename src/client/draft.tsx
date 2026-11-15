@@ -1,11 +1,13 @@
 /**
  * Optimistic settings draft state with sessionStorage persistence and three-way rebase against concurrent saves.
  */
-import { useEffect, useLayoutEffect, useReducer, useRef, type FormEvent } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore,
+  type FormEvent, type ReactNode } from 'react'
+import type { SettingsGroup } from './route.ts'
 import { ApiError } from './api.ts'
 import { usePanel } from './provider.tsx'
 import { errorText, type T } from './text.ts'
-import { Button } from './controls.tsx'
+import { Button } from './ui/index.ts'
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -134,7 +136,7 @@ export interface DraftOptions<V> {
 }
 /** Manage a settings draft, persisting unsaved edits in `sessionStorage` and rebasing them when newer server revisions arrive. */
 export function useDraft<V, M = undefined>({ key, saved, revision, save, reload }: DraftOptions<V>) {
-  const { restart } = usePanel()
+  const { t, restart, notify } = usePanel()
   const [state, dispatch] = useReducer(draftReducer<V, M>, undefined, () => {
     const stored = read<V, M>(key)
     const initial: DraftState<V, M> = stored ? { phase: 'editing', draft: stored, notice: { kind: 'restored' } } : { phase: 'clean' }
@@ -145,6 +147,7 @@ export function useDraft<V, M = undefined>({ key, saved, revision, save, reload 
     if (!key) return
     try { if (state.draft) sessionStorage.setItem(key, JSON.stringify(state.draft)); else sessionStorage.removeItem(key) }
     catch (failure) { dispatch({ type: 'refused', notice: { kind: 'unstored', error: errorText(failure) } }) }
+    drafts.changed()
   }, [key, state.draft])
   // A draft lives in this tab's session storage: closing the tab loses it, so the browser asks first.
   const unsaved = state.draft !== undefined
@@ -177,12 +180,79 @@ export function useDraft<V, M = undefined>({ key, saved, revision, save, reload 
   return { state, value: state.sent?.value ?? state.draft?.value ?? saved, meta: state.draft?.meta,
     revision: state.draft?.revision ?? revision ?? 0, dirty: state.draft !== undefined,
     busy: state.phase === 'saving' || state.phase === 'awaitingRevision', submit,
-    edit: (value: V, meta?: M) => dispatch({ type: 'edit', value, meta, saved, revision }), discard: () => dispatch({ type: 'discard' }) }
+    edit: (value: V, meta?: M) => dispatch({ type: 'edit', value, meta, saved, revision }),
+    // Discarding keeps the draft in memory for its notice's Undo, which puts it back (SET-4).
+    discard: () => {
+      const dropped = state.draft
+      dispatch({ type: 'discard' })
+      if (dropped) notify(t('draftDiscarded'), 'info', { label: t('undo'),
+        onClick: () => dispatch({ type: 'edit', value: dropped.value, meta: dropped.meta, saved, revision }) })
+    } }
+}
+
+/** Tells the views reading the drafts in session storage that one was stored or dropped. */
+const drafts = (() => {
+  let version = 0
+  const listeners = new Set<() => void>()
+  return { changed: () => { version++; for (const listener of listeners) listener() }, get: () => version,
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } } }
+})()
+/** The settings group a stored draft belongs to, by its block. */
+function groupOf(block: string): SettingsGroup | undefined {
+  if (block === 'policy' || block === 'eval') return 'eval'
+  if (block === 'executor') return 'execution'
+  if (block === 'prompts') return 'prompts'
+  if (block.startsWith('source:') || block.startsWith('instances:')) return 'source'
+  return undefined
+}
+const DRAFT_PREFIX = 'dsh-superagent/draft/'
+/** The settings groups that hold an unsaved draft in this tab, so the settings nav can mark them. */
+export function useDraftGroups(): ReadonlySet<SettingsGroup> {
+  const version = useSyncExternalStore(drafts.subscribe, drafts.get, drafts.get)
+  return useMemo(() => {
+    void version
+    const groups = new Set<SettingsGroup>()
+    try {
+      for (let index = 0; index < sessionStorage.length; index++) {
+        const key = sessionStorage.key(index)
+        const group = key?.startsWith(DRAFT_PREFIX) ? groupOf(key.slice(DRAFT_PREFIX.length)) : undefined
+        if (group) groups.add(group)
+      }
+    } catch { /* storage that cannot be read marks nothing */ }
+    return groups
+  }, [version])
+}
+
+/** The save bars of a page that hold changes, so one bar can save them all (SET-5). */
+interface SaveAllRegistry { set: (id: string, save: (() => void) | undefined) => void }
+const SaveAllContext = createContext<SaveAllRegistry | undefined>(undefined)
+/**
+ * Gathers the page's save bars: when two or more blocks hold changes, one bar at the top of the page saves them all at once, each
+ * against its own revision; a block that is refused shows why in its own bar.
+ */
+export function SaveAll({ children }: { children: ReactNode }) {
+  const { t } = usePanel()
+  const [bars, setBars] = useState<ReadonlyMap<string, () => void>>(new Map())
+  const set = useCallback((id: string, save: (() => void) | undefined) => setBars(current => {
+    if (current.get(id) === save || (!save && !current.has(id))) return current
+    const next = new Map(current)
+    if (save) next.set(id, save); else next.delete(id)
+    return next
+  }), [])
+  const registry = useMemo(() => ({ set }), [set])
+  return <SaveAllContext.Provider value={registry}>
+    {bars.size > 1 && <div className="dt-saveall" role="region" aria-label={t('saveAllLabel')}>
+      <span className="dt-hint">{t('saveAllChanged', { count: bars.size })}</span>
+      <Button variant="primary" size="sm" onClick={() => { for (const save of bars.values()) save() }}>{t('saveAll')}</Button>
+    </div>}
+    {children}
+  </SaveAllContext.Provider>
 }
 
 /** Sticky save/discard bar for a settings block; transfers focus back to its parent block when hidden so keyboard navigation does not reset. */
-export function SaveBar({ state, dirty, busy, words, status, onDiscard, onSave }: {
+export function SaveBar({ state, dirty, busy, words, status, saveLabel, blocked, onDiscard, onSave }: {
   state: DraftState<unknown, unknown>; dirty: boolean; busy: boolean; words?: DraftWords; status?: string | undefined
+  saveLabel?: string; blocked?: boolean
   onDiscard: () => void; onSave?: () => void
 }) {
   const { t } = usePanel()
@@ -191,6 +261,20 @@ export function SaveBar({ state, dirty, busy, words, status, onDiscard, onSave }
   const bar = useRef<HTMLDivElement>(null)
   const block = useRef<HTMLElement | null>(null)
   const focused = useRef(false)
+  const registry = useContext(SaveAllContext)
+  const id = useRef(Math.random().toString(36).slice(2))
+  // A bar with changes it can save offers them to the page's Save all: its own save, or its form's submit.
+  const offered = dirty && !busy && !blocked
+  const save = useRef(onSave)
+  save.current = onSave
+  useEffect(() => {
+    if (!registry) return
+    registry.set(id.current, offered ? () => {
+      if (save.current) save.current()
+      else bar.current?.closest('form')?.requestSubmit()
+    } : undefined)
+  }, [registry, offered])
+  useEffect(() => () => registry?.set(id.current, undefined), [registry])
   useLayoutEffect(() => {
     if (shown) { block.current = bar.current?.parentElement ?? null; return }
     const lost = !document.activeElement || document.activeElement === document.body
@@ -204,8 +288,8 @@ export function SaveBar({ state, dirty, busy, words, status, onDiscard, onSave }
     {line.error ? <p className="dt-error dt-clamp" role="alert">{line.error}</p>
       : <p className="dt-hint" aria-live="polite">{status ?? line.status}</p>}
     <Button variant="ghost" size="sm" disabled={!dirty || busy} onClick={onDiscard}>{t('discard')}</Button>
-    <Button variant="primary" size="sm" disabled={!dirty || busy} {...onSave ? { onClick: onSave } : { type: 'submit' as const }}>
-      {t('save')}
+    <Button variant="primary" size="sm" disabled={!dirty || busy || !!blocked} {...onSave ? { onClick: onSave } : { type: 'submit' as const }}>
+      {saveLabel ?? t('save')}
     </Button>
   </div>
 }

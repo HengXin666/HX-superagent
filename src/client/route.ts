@@ -5,13 +5,15 @@ import { DECISION_FILTERS, type DecisionFilter } from './api.ts'
 import type { T } from './text.ts'
 
 export const TABS = ['overview', 'source', 'trigger', 'eval', 'execution', 'console', 'settings'] as const
+/** How far back the Eval list reaches: everything, or the last day or week. */
+export type DecisionWindow = '24h' | '7d'
 export type Tab = typeof TABS[number]
-export const SETTINGS_GROUPS = ['source', 'eval', 'execution', 'prompts', 'deployment'] as const
+export const SETTINGS_GROUPS = ['source', 'eval', 'execution', 'presets', 'prompts', 'deployment'] as const
 export type SettingsGroup = typeof SETTINGS_GROUPS[number]
 export type Route = { page: 'overview' | 'source' | 'console'; id?: undefined; query?: undefined }
   | { page: 'trigger'; id?: undefined; query?: { filter?: ThreadFilter } }
   | { page: 'trigger'; id: string; query?: { trigger?: string } }
-  | { page: 'eval'; id?: undefined; query?: { filter?: DecisionFilter; window?: '24h' } }
+  | { page: 'eval'; id?: undefined; query?: { filter?: DecisionFilter; window?: DecisionWindow } }
   | { page: 'execution'; id?: undefined; query?: { filter?: TicketFilter } }
   | { page: 'execution'; id: string; query?: undefined }
   | { page: 'settings'; id?: undefined; query: { group: SettingsGroup; source?: string; version?: string } }
@@ -38,7 +40,7 @@ export function parseRoute(value: unknown): Route | undefined {
     case 'trigger': return record ? { page, id: record, query: compact({ trigger: text('trigger') }) }
       : { page, query: compact({ filter: pick(THREAD_FILTERS, query?.filter) }) }
     case 'eval': return { page, query: compact({ filter: pick(DECISION_FILTERS, query?.filter),
-      window: query?.window === '24h' ? '24h' as const : undefined }) }
+      window: query?.window === '24h' || query?.window === '7d' ? query.window as DecisionWindow : undefined }) }
     case 'execution': return record ? { page, id: record } : { page, query: compact({ filter: pick(TICKET_FILTERS, query?.filter) }) }
     case 'settings': return { page, query: { group: pick(SETTINGS_GROUPS, query?.group) ?? 'source',
       ...compact({ source: text('source'), version: text('version') }) } }
@@ -47,7 +49,13 @@ export function parseRoute(value: unknown): Route | undefined {
 }
 
 const ROUTE_KEY = 'dsh-superagent/route'
-export interface Location { route: Route; stack: Route[]; group?: SettingsGroup | undefined }
+/**
+ * Where the panel is. `drawer` holds the details opened over a list, newest last: the list stays mounted behind them, keeping
+ * what it loaded and where it was scrolled, and closing the drawer returns to it.
+ */
+export interface Location { route: Route; stack: Route[]; group?: SettingsGroup | undefined; drawer?: Route[] | undefined }
+/** A route that names one Ticket or Thread, which opens in the drawer over a list. */
+export const isDetail = (route: Route): boolean => route.id !== undefined
 export const lastSettingsGroup = ({ route, group }: Location): SettingsGroup => route.page === 'settings' ? route.query.group
   : group ?? 'source'
 export function initialLocation(): Location {
@@ -55,7 +63,10 @@ export function initialLocation(): Location {
     const stored = JSON.parse(sessionStorage.getItem(ROUTE_KEY) ?? 'null') as { route?: unknown; stack?: unknown; group?: unknown } | null
     const route = parseRoute(stored?.route)
     const stack = Array.isArray(stored?.stack) ? stored.stack as unknown[] : []
-    if (route) return { route, stack: stack.flatMap(item => parseRoute(item) ?? []), group: pick(SETTINGS_GROUPS, stored?.group) }
+    const drawer = (Array.isArray((stored as { drawer?: unknown } | null)?.drawer) ? (stored as { drawer: unknown[] }).drawer : [])
+      .flatMap(item => parseRoute(item) ?? []).filter(isDetail)
+    if (route) return { route, stack: stack.flatMap(item => parseRoute(item) ?? []), group: pick(SETTINGS_GROUPS, stored?.group),
+      ...drawer.length && !isDetail(route) ? { drawer } : {} }
   } catch (error) {
     // Route memory is a convenience; an unreadable value falls back to HOME.
     void error

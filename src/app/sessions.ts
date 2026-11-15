@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { DEFAULT_ROUTER_PRESET, DEFAULT_WORKER_PRESET } from '../policy.ts'
 import { listAgentPresets, type AgentPresetView, type PresetRegistry } from './agent-presets.ts'
+import { AgentOverlays, ROLE_TOOLS, overlayPrompt } from './agent-overlays.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
@@ -58,8 +59,7 @@ export const WORKER_PRESET = DEFAULT_WORKER_PRESET, ROUTER_PRESET = DEFAULT_ROUT
  * changes the profile, schedules work or starts goals outside the worker slots, the pause and a person's hold, starts or
  * messages other Sessions, or edits documents.
  */
-const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
-  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+const WORK_TOOLS = ROLE_TOOLS.worker
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -96,10 +96,14 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  /** The capability packs each role runs with on top of its agent preset. */
+  readonly overlays: AgentOverlays
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context)
+    this.overlays = new AgentOverlays(host.store, () => { const settings = host.store.settings()
+      return { worker: settings.executor.overlays, orchestrator: settings.eval.overlays } })
     // Deliver relays and notices to the main Session in the order they were queued.
     host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
     host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
@@ -157,7 +161,24 @@ export class Sessions {
   /** The agent preset the settings name for `role`'s new Sessions. */
   presetOf(role: 'orchestrator' | 'worker'): string {
     const settings = this.host.store.settings()
+    // A turned-on pack that names a base decides it (the last such pack); a set of packs the role cannot run under keeps the setting's.
+    try {
+      const effective = this.overlays.effective(role, this.overlaysOf(role))
+      if (effective.base && !effective.problems.length) return effective.base.id
+    } catch { /* an unreadable set of packs keeps the setting's base */ }
     return role === 'worker' ? settings.executor.agentPreset : settings.eval.agentPreset
+  }
+  /** The capability packs the settings turn on for `role`, in order. */
+  overlaysOf(role: 'orchestrator' | 'worker'): string[] {
+    const settings = this.host.store.settings()
+    return role === 'worker' ? settings.executor.overlays : settings.eval.overlays
+  }
+  /** The tools `role` keeps once its packs are applied; an unreadable set of packs keeps the role's own tools. */
+  private allowed(role: 'orchestrator' | 'worker'): string[] {
+    try {
+      const effective = this.overlays.effective(role, this.overlaysOf(role))
+      return effective.problems.length ? [...ROLE_TOOLS[role]] : effective.tools
+    } catch { return [...ROLE_TOOLS[role]] }
   }
   /** The agent presets DSH's registry offers, with whether each role may run under it. */
   agentPresets(): AgentPresetView[] {
@@ -257,7 +278,8 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      const packs = overlayPrompt(this.overlays.effective(master ? 'orchestrator' : 'worker', this.overlaysOf(master ? 'orchestrator' : 'worker')))
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${packs ? `${packs}\n` : ''}${current ? mandateInstructions(current.mandate) : ''}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -272,7 +294,10 @@ export class Sessions {
     const register = this.registerTool(agent, binding)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
+      const parent = scopeParentOf(agent)
+      // A tool a pack granted reaches the main Session only where DSH knows it; the role's own tools stay as the preset has them.
+      const allow = this.allowed('orchestrator').filter(name => ROLE_TOOLS.orchestrator.includes(name) || agent.ctx.tools.get(name, parent))
+      binding.disposers.push(agent.ctx.tools.restrict({ allow }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
@@ -301,7 +326,10 @@ export class Sessions {
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+    const kept = this.allowed('worker')
+    // The work tools the packs keep, then any tool a pack granted, each only where DSH knows it.
+    const allow = [...WORK_TOOLS.filter(name => kept.includes(name)), ...kept.filter(name => !WORK_TOOLS.includes(name))]
+      .filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined

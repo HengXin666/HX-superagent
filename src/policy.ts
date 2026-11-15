@@ -84,12 +84,17 @@ export const PolicyConfigSchema = z.object({
 export const DEFAULT_WORKER_PRESET = 'dsh-superagent-worker', DEFAULT_ROUTER_PRESET = 'dsh-superagent-router'
 /** An agent preset id as DSH's preset registry names it. */
 export const AgentPresetIdSchema = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9@/._:-]+$/, 'Not an agent preset id')
+/** Capability packs a role turns on, in order, on top of its agent preset (see app/agent-overlays.ts). */
+export const OverlayIdsSchema = z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/)).max(16)
+  .refine(ids => new Set(ids).size === ids.length, 'A capability pack is listed twice').default([])
 export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
   model: RoleModelSchema.nullable().default(null),
   /** The agent preset a new main Session is created with; one that is not the bundle's router runs under the stricter wait guard. */
   agentPreset: AgentPresetIdSchema.default(DEFAULT_ROUTER_PRESET),
+  /** Capability packs the main Session runs with, in order. */
+  overlays: OverlayIdsSchema,
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
@@ -102,6 +107,8 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
   /** The agent preset a new Executor Session is created with; its tools are still cut down to the work tools it has. */
   agentPreset: AgentPresetIdSchema.default(DEFAULT_WORKER_PRESET),
+  /** Capability packs Executor Sessions run with, in order. */
+  overlays: OverlayIdsSchema,
 }).strict()
 /** A stored Source instance; `kind` names the Source kind of an extra instance of a multi-instance kind (such as `github-2`), whose id is not the kind. */
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}),

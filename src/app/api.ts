@@ -1,6 +1,7 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { AgentPresetView } from './agent-presets.ts'
+import type { AgentOverlayView, EffectiveRole } from './agent-overlays.ts'
 import type { PromptPresetView } from './prompt-presets.ts'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
@@ -32,7 +33,7 @@ export interface Api {
   'GET threads/:key': { query?: { limit?: number; before?: string; around?: string }; response: ThreadDetailView }
   'POST threads/:key/unsubscribe': { response: { removed: boolean; thread: string; context_delivery: Delivery } }
   'POST triggers/:id/requeue': { response: { queued: boolean } }
-  'GET decisions': { query?: Paged & { kind?: string; window?: '24h' }; response: DecisionListView }
+  'GET decisions': { query?: Paged & { kind?: string; window?: '24h' | '7d' }; response: DecisionListView }
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
@@ -48,6 +49,10 @@ export interface Api {
   'GET models': { response: ModelCatalog }
   /** The agent presets DSH offers, with which role may run under each, and the ones the settings name. */
   'GET agent-presets': { response: { presets: AgentPresetView[]; selected: { worker: string; orchestrator: string } } }
+  'GET agent-overlays': { response: { revision: number; overlays: AgentOverlayView[]; roleTools: Record<'worker' | 'orchestrator', readonly string[]>
+    required: Record<'worker' | 'orchestrator', readonly string[]>; selected: { worker: string[]; orchestrator: string[] } } }
+  'PUT agent-overlays': { body: { overlays: unknown[]; revision: number }; response: { revision: number } }
+  'POST agent-overlays/effective': { body: { role: 'worker' | 'orchestrator'; overlays: string[] }; response: EffectiveRole }
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
   'POST prompts/preview': { body: PromptConfig; response: ReturnType<Prompts['preview']> }

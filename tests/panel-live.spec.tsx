@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { expect, it, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, settle, click, type, text, field, all } from './fixtures/panel.tsx'
+import { usePanel, mount, settle, click, type, text, all } from './fixtures/panel.tsx'
 import { liveFeed, server, ticketSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -32,11 +32,12 @@ it('reloads the open view when the live feed says its topic changed, and says wh
 
 it('searches once a person pauses typing, without Enter', async () => {
   await mount()
-  await type(field<HTMLInputElement>(zh.searchLabel), 'issue')
+  await click(zh.commandOpen)
+  await type(document.querySelector<HTMLInputElement>('.dt-command-input')!, 'issue')
   expect(server.requests.some(request => request.path.startsWith('search'))).toBe(false)
   await wait(320); await settle()
   expect(server.requests.filter(request => request.path.startsWith('search')).map(request => request.path)).toEqual(['search?q=issue'])
-  expect(all('.dt-search-results').length).toBe(1)
+  expect(document.querySelector('.dt-command-found')).not.toBeNull()
 })
 
 it('opens the command palette with ⌘K, filters by what one types and runs the picked command with Enter', async () => {

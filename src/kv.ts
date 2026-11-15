@@ -2,6 +2,7 @@
  * Typed key-value store keys and key families grouped by the single component that owns and writes each family.
  * Readers and writers refer to a record by its entry here so each key is spelled once with its value type.
  */
+import type { AgentOverlay } from './app/agent-overlays.ts'
 import type { PromptPreset } from './app/prompt-presets.ts'
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
@@ -34,6 +35,8 @@ export const KV = {
     builtIn: family<string, [base: string]>('prompt-built-in:'),
     /** The team's own prompt presets (the bundle's are not stored), saved as one list against its revision. */
     presets: record<{ revision: number; presets: PromptPreset[] }>('prompt-presets') },
+  /** Agents: the team's own capability packs (the bundle's are not stored), saved as one list against its revision; a save reports the settings topic. */
+  agents: { overlays: record<{ revision: number; overlays: AgentOverlay[] }>('settings-agent-overlays') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */

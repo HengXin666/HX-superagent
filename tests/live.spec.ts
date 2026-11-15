@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
-import { LiveHub, summarize, toolSummary } from '../src/app/live.ts'
+import { LiveHub, stageOf, summarize, toolSummary } from '../src/app/live.ts'
 import { streamEvents } from '../src/app/http.ts'
 import { Store } from '../src/app/store.ts'
 
@@ -72,4 +72,17 @@ it('streams the events after Last-Event-ID, then new ones, or a reset when some 
   expect(stream({}, '1').text()).toContain('event: reset')
   // A new connection without a position starts from now.
   expect(stream({}).text()).not.toContain('event: ticket')
+})
+
+it('places each domain event at the pipeline step it happens at, with what it concerns', () => {
+  const at = '2026-11-14T00:00:00.000Z'
+  expect(stageOf({ type: 'trigger.received', at, data: { triggerId: 'tr1', threads: ['github:1'] } })).toEqual({ type: 'trigger.received',
+    node: 'source', at, triggerId: 'tr1' })
+  expect(stageOf({ type: 'decision.recorded', at, data: { decisionId: 'd1', kind: 'accept', threadKey: 'github:1' } })).toEqual({
+    type: 'decision.recorded', node: 'main', at, decisionId: 'd1', threadKey: 'github:1', detail: 'accept' })
+  expect(stageOf({ type: 'ticket.ended', at, data: { ticketId: 't1', by: 'executor', outcome: 'merged' } })).toMatchObject({ node: 'reply',
+    ticketId: 't1', detail: 'merged · executor' })
+  const hub = new LiveHub()
+  hub.stage({ type: 'assignment.started', at, data: { ticketId: 't1', assignmentId: 'a1' } })
+  expect(hub.recent()).toMatchObject([{ topic: 'stage', data: { node: 'executor', ticketId: 't1' } }])
 })

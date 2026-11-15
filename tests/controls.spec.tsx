@@ -4,14 +4,15 @@ import { join } from 'node:path'
 import { act, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it } from 'vitest'
-import { Modal, SegmentedTabs } from '../src/client/controls.tsx'
+import { Modal, PageTabs as SegmentedTabs } from '../src/client/ui/index.ts'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 it('imports no DSH client runtime package, only React and type declarations', () => {
   const dir = join(process.cwd(), 'src/client')
-  for (const name of readdirSync(dir)) {
+  for (const name of readdirSync(dir, { recursive: true }) as string[]) {
+    if (!/\.tsx?$/.test(name)) continue
     const source = readFileSync(join(dir, name), 'utf8')
     for (const match of source.matchAll(/^import (type )?[^'"]*from '(@deepseek-ai\/[^']+)'/gm)) expect({ name, from: match[2], typeOnly: !!match[1] }).toMatchObject({ typeOnly: true })
     expect(source).not.toContain('dsh-client-ui-primitives\'')

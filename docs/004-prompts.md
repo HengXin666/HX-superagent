@@ -65,6 +65,8 @@ The system prompt is assembled in this order:
 7. `runtime/environment`.
 8. `runtime/policy`, for the main Session only.
 
+Capability packs a role turns on add their instructions after this prompt, under `## Capability packs`. The preview (`POST prompts/preview`) also returns `layers` for each role: the prompt split by who wrote each piece (a built-in part, the team, each preset, with a section a preset appends to split into the team's text and the preset's), then the packs' instructions, then the skills, each with its text and length; the prompt layers joined by a blank line are the composed prompt. The panel's **Assembly** view draws them.
+
 Admission instructions come from `prompts/admission.md`. They describe proactive assessment and when an irrelevant candidate can be ignored from its card. `orchestrator_eval` returns context rather than repeating these instructions.
 
 The environment section gives the main Session deployment-wide values and each Executor its Ticket-specific values. The Policy section is regenerated from settings on every model request. It contains the Policy version, accept mode, the explicit-request exemption, and enabled rules as `- <name> (<id>): <instruction>`, or a statement that none is enabled. It is last so a Policy change leaves the preceding prompt text unchanged.

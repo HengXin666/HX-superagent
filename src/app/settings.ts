@@ -35,6 +35,10 @@ function presetGuard(role: 'orchestrator' | 'worker', current: string, candidate
   if (!compatible[role]) throw new UserError('presetIncompatible', { role: role === 'worker' ? 'Executor' : 'main Session', preset: candidate,
     reason: (role === 'worker' ? notes.worker : notes.orchestrator) ?? '' })
 }
+/** Only the panel turns a role's capability packs on or off, as it does the agent preset. */
+function overlayGuard(current: readonly string[], candidate: readonly string[], origin: SettingsOrigin): void {
+  if (origin !== 'panel' && JSON.stringify(current) !== JSON.stringify(candidate)) throw new UserError('panelOnlyPreset')
+}
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
   parse(value: unknown, sources: SourceRegistry, id: string): unknown
@@ -50,7 +54,10 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Bl
     merge: (settings, value) => ({ ...settings, policy: value as SettingsValue['policy'] }),
   },
   eval: { parse: value => EvalConfigSchema.parse(value), merge: (settings, value) => ({ ...settings, eval: value as SettingsValue['eval'] }),
-    guard: (current, candidate, origin) => presetGuard('orchestrator', current.eval.agentPreset, candidate.eval.agentPreset, origin) },
+    guard: (current, candidate, origin) => {
+      presetGuard('orchestrator', current.eval.agentPreset, candidate.eval.agentPreset, origin)
+      overlayGuard(current.eval.overlays, candidate.eval.overlays, origin)
+    } },
   executor: {
     parse: value => ExecutorConfigSchema.parse(value),
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
@@ -58,6 +65,7 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Bl
     guard: (current, candidate, origin) => {
       if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment')
       presetGuard('worker', current.executor.agentPreset, candidate.executor.agentPreset, origin)
+      overlayGuard(current.executor.overlays, candidate.executor.overlays, origin)
     },
   },
   source: {
@@ -107,7 +115,7 @@ export interface SettingsHost {
   readonly context: Context
   readonly lifetime: AbortSignal
   /** Session manager through which the main Session is notified of saved settings. */
-  readonly sessions: Pick<Sessions, 'notify' | 'delivery'>
+  readonly sessions: Pick<Sessions, 'notify' | 'delivery' | 'overlays'>
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
@@ -210,6 +218,8 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    if (block === 'eval') sessions.overlays.check('orchestrator', candidate.eval.overlays)
+    if (block === 'executor') sessions.overlays.check('worker', candidate.executor.overlays)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.

@@ -30,11 +30,12 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
   await type(field<HTMLInputElement>(zh.maxWorkers), '4')
   await click(tab(zh['tab.execution']))
-  await click(zh.pauseProcessing)
-  await click(zh.confirm)
+  // Pausing can be undone: the switch turns it off at once, and the notice offers Undo.
+  await click(find(zh.processingSwitch, '[role="switch"]'))
   expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: true } })
   expect(text()).toContain(zh.processingPaused)
-  expect(find(zh.resumeProcessing).textContent).toBe(zh.resumeProcessing)
+  expect(find(zh.processingSwitch, '[role="switch"]').getAttribute('aria-checked')).toBe('false')
+  expect(find(zh.undo)).toBeTruthy()
   await click(tab(zh['tab.settings']))
   await click(zh.save)
   expect(server.settings).toMatchObject({ paused: true, executor: { maxWorkers: 4 } })
@@ -45,7 +46,7 @@ it('stops an open Ticket from its page after confirmation', async () => {
   await click('修复回归')
   await click(zh.stop)
   expect(server.requests.some(request => request.path.endsWith('/stop'))).toBe(false)
-  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('停止“修复回归”')
+  expect(all('[role="dialog"]').at(-1)?.textContent).toContain('停止“修复回归”')
   await click(zh.confirm)
   expect(server.requests.some(request => request.path === 'tickets/t1/stop' && request.method === 'POST')).toBe(true)
 })
@@ -54,13 +55,15 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   await mount()
   await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
   expect(document.querySelector('.dt-page-title h2')?.textContent).toBe('修复回归')
+  // The Ticket opens in the drawer over the list.
+  const drawn = (selector: string) => all(`[data-drawer-route="execution:t1"] ${selector}`)
   // Progress is in the Channels and the Session, so the page has no report section.
-  expect(all('.dt-section-title').map(title => title.querySelector('.dt-section-name')?.textContent)).toEqual(['授权详情', '未送达的输入', '订阅的线程'])
+  expect(drawn('.dt-section-title').map(title => title.querySelector('.dt-section-name')?.textContent)).toEqual(['授权详情', '未送达的输入', '订阅的线程'])
   expect(document.querySelector('.dt-status-line .dt-stage')?.textContent).toBe(zh.executingLabel)
-  expect(document.querySelector('.dt-status-line .dt-stage .dt-spinner')).not.toBeNull()
+  expect(document.querySelector('.dt-status-line .dt-stage .hx-dot-spinner')).not.toBeNull()
   // A Thread this Ticket follows reads as subscribed on its page, though no other Ticket follows it.
-  expect(all('.dt-list .dt-ticket .dt-stage').map(stage => stage.textContent)).toContain(zh.threadSubscribed)
-  expect(all('.dt-list .dt-ticket .dt-stage').map(stage => stage.textContent)).not.toContain(zh.threadUnsubscribed)
+  expect(drawn('.dt-list .dt-ticket .dt-stage').map(stage => stage.textContent)).toContain(zh.threadSubscribed)
+  expect(drawn('.dt-list .dt-ticket .dt-stage').map(stage => stage.textContent)).not.toContain(zh.threadUnsubscribed)
   expect(all('.dt-status-line .dt-lv').map(item => item.textContent)).toEqual(['授权 明确', '发起 飞书 · Alice', expect.stringMatching(/^更新 /)])
   for (const expected of ['修复登录页回归', '点名方式@ 智能体', '名单里的人明确请求，由主 Session 接单', '未送达：等待派工运行',
     'Alice：顺便改标题']) expect(text()).toContain(expected)
@@ -71,8 +74,10 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   await click(zh['term.environment'])
   expect(all('.dt-disclosure-body .dt-table tr').map(row => row.textContent)).toEqual(['DSH_SUPERAGENT_DIR/w/t1',
     'DSH_SUPERAGENT_GITHUB_NUMBER—'])
+  // The Trigger behind it opens in the same drawer, over the same list.
   await click(document.querySelector<HTMLElement>('.dt-trigger-link')!)
-  expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
+  expect(document.querySelector('[data-drawer-route]')?.getAttribute('data-drawer-route')).toMatch(/^trigger:/)
+  expect(document.querySelector('.hx-drawer-sub')?.textContent).toBe(zh['term.ticket'])
 })
 
 it('reports a missing Ticket instead of rendering an empty page', async () => {
@@ -100,7 +105,7 @@ it('links a question to its Channel, folds consecutive automated messages among 
   await click(zh['tab.eval'])
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   expect(text()).not.toContain('到期后记为未完成')
-  const tip = field(zh.evalTimeout).closest('.dt-field')!.querySelector<HTMLElement>('.dt-info')!
+  const tip = field(zh.evalTimeout).closest('.dt-field')!.querySelector<HTMLElement>('.hx-info')!
   await act(async () => { tip.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
   expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('到期后记为未完成')
   expect(tip.closest('.dt-field')!.textContent).not.toContain('到期后记为未完成')
@@ -186,7 +191,7 @@ it('gives a Ticket a bot\'s message started its basis, marks a Thread it follows
     thread: 'feishu:oc_1:om_root', handback: { reason: 'Asks for a new page', at: '2026-09-22T00:05:00Z' } } }] }
   at({ page: 'execution', id: 't1' })
   await mount()
-  const facts = () => all('.dt-kv > div').map(row => [row.querySelector('dt')?.textContent, row.querySelector('dd')?.textContent])
+  const facts = () => all('.hx-kv > div').map(row => [row.querySelector('dt')?.textContent, row.querySelector('dd')?.textContent])
   expect(facts()).toEqual(expect.arrayContaining([[zh['basis.sender'], '评审机器人'], [zh['basis.bot'], zh.yes], [zh['basis.mode'], zh['mode.auto']]]))
   expect(all('.dt-list .dt-ticket').map(row => row.querySelector('.dt-tag')?.textContent)).toEqual([undefined, zh.contextOnly])
   await click(zh.deliveredInputs.replace('{count}', '1'))
@@ -224,4 +229,92 @@ it('sends one stop for a double click on Confirm', async () => {
   const confirm = find(zh.confirm)
   await act(async () => { confirm.click(); confirm.click() })
   expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
+})
+
+it('turns several capability packs on for the Executor, in order, and shows the tools they take away before the save', async () => {
+  await mount()
+  await click(zh['tab.settings'])
+  await click(find(zh['promptPart.runtime/work'], '.dt-settings-link'))
+  await click(zh.overlaysPick)
+  const option = (name: string) => all('.dt-preset-option').find(element => element.querySelector('.dt-preset-name')?.textContent === name)!
+  await click(option('离线 / No web'))
+  await click(option('谨慎改动 / Careful changes'))
+  await click(zh.promptPresetsApply)
+  expect(all('.dt-overlay-bar .dt-preset-chip-name').map(item => item.textContent)).toEqual(['离线 / No web', '谨慎改动 / Careful changes'])
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 250)) })
+  expect(all('.dt-overlay-tool[data-removed]').map(item => item.textContent)).toEqual(['web_search', 'web_fetch'])
+  await click(zh.save)
+  expect(server.settings.executor).toMatchObject({ overlays: ['no-web', 'careful-review'] })
+})
+
+it('opens a Ticket in a drawer over the list, keeps the list where it was, steps back inside the drawer, and opens it as a page', async () => {
+  await mount()
+  await click(tab(zh['tab.execution']))
+  const listed = () => all('#dt-page .dt-open').map(button => button.textContent)
+  const before = listed()
+  await click(all('#dt-page .dt-open').find(button => button.textContent === '修复回归')!)
+  const drawer = () => document.querySelector('.hx-drawer')
+  expect(drawer()?.querySelector('[data-drawer-route]')?.getAttribute('data-drawer-route')).toBe('execution:t1')
+  // The list stays mounted behind it.
+  expect(listed()).toEqual(before)
+  // A Thread opened from the Ticket stacks in the drawer; back returns to the Ticket, and closing returns to the list.
+  const thread = drawer()!.querySelector<HTMLElement>('.dt-list .dt-ticket .dt-open, .dt-list .dt-open')
+  if (thread) {
+    await click(thread)
+    expect(drawer()?.querySelector('.hx-drawer-sub')?.textContent).toBe(zh['term.ticket'])
+    await click(find(zh['term.ticket'], '.hx-drawer .dt-page-head button'))
+    expect(drawer()?.querySelector('[data-drawer-route]')?.getAttribute('data-drawer-route')).toBe('execution:t1')
+  }
+  await click(find(zh.close, '.hx-drawer-head button'))
+  expect(drawer()).toBeNull()
+  expect(listed()).toEqual(before)
+  // Open as a full page: the Ticket replaces the list, and back returns to it.
+  await click(all('#dt-page .dt-open').find(button => button.textContent === '修复回归')!)
+  await click(find(zh.openFullPage, '.hx-drawer-head button'))
+  expect(drawer()).toBeNull()
+  expect(document.querySelector('#dt-page .dt-page-title h2')?.textContent).toBe('修复回归')
+  await click(find(zh['tab.execution'], '#dt-page .dt-page-head button'))
+  expect(listed()).toEqual(before)
+})
+
+it('stacks each role in one place: the agent preset, its packs in order, and the prompt presets both roles share', async () => {
+  await mount()
+  await click(zh['tab.settings'])
+  await click(find(zh['settingsGroup.presets'], '.dt-settings-link'))
+  // Both roles are on one page, each with its base preset and its packs.
+  expect(all('.dt-stack .dt-block-title').map(item => item.firstChild?.textContent)).toEqual([zh['term.mainSession'], zh['term.executor']])
+  expect(all('.dt-stack .dt-preset-field')).toHaveLength(2)
+  expect(document.querySelector('.dt-presets-model')?.textContent).toContain(zh.presetsModel)
+  // Turning packs on for the Executor here saves them with its settings, as the Execution settings would.
+  const executor = all('.dt-stack')[1]!
+  await click(find(zh.overlaysPick, '.dt-stack:nth-child(2) button'))
+  const option = (name: string) => all('.dt-preset-option').find(element => element.querySelector('.dt-preset-name')?.textContent === name)!
+  await click(option('离线 / No web'))
+  await click(option('不派子 Agent / No subagents'))
+  await click(zh.promptPresetsApply)
+  expect([...executor.querySelectorAll('.dt-overlay-bar .dt-preset-chip-name')].map(item => item.textContent))
+    .toEqual(['离线 / No web', '不派子 Agent / No subagents'])
+  await click(zh.save)
+  expect(server.settings.executor).toMatchObject({ overlays: ['no-web', 'no-subagents'] })
+  // The prompt presets both roles read are listed with a way to their editor.
+  expect(document.querySelector('.dt-presets-page')?.textContent).toContain(zh.presetsPrompt)
+})
+
+it('makes a new pack from a role\'s chain in one step: the name takes focus, and the saved pack joins that role\'s chain', async () => {
+  await mount()
+  await click(zh['tab.settings'])
+  await click(find(zh['settingsGroup.presets'], '.dt-settings-link'))
+  const executor = all('.dt-stack')[1]!
+  await click(find(zh.overlaysNew, '.dt-stack:nth-child(2) .dt-preset-bar-head button'))
+  const name = field<HTMLInputElement>(zh.promptPresetName)
+  expect(document.activeElement).toBe(name)
+  await type(name, 'Release Day')
+  await click(find(zh.save, '.dt-preset-editor button'))
+  expect(server.overlays.view().overlays.some(item => item.id === 'release-day' && !item.builtin)).toBe(true)
+  // The library closes and the new pack is on the Executor's chain as a change to save with its block; the main Session's is untouched.
+  expect(document.querySelector('.dt-preset-library')).toBeNull()
+  expect([...executor.querySelectorAll('.dt-overlay-bar .dt-preset-chip-name')].map(item => item.textContent)).toEqual(['Release Day'])
+  expect([...all('.dt-stack')[0]!.querySelectorAll('.dt-overlay-bar .dt-preset-chip-name')]).toHaveLength(0)
+  await click(find(zh.save, '.dt-stack:nth-child(2) button'))
+  expect(server.settings.executor).toMatchObject({ overlays: ['release-day'] })
 })

@@ -1,10 +1,10 @@
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
 import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
-import { LiveClient, LiveContext } from './live.ts'
+import { holdLive, LiveContext, type LiveClient, type LiveEvent } from './live.ts'
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
+import { ToastProvider, UI_STYLES, useToast, type ToastApi, type ToastTone } from './ui/index.ts'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
 
 export interface PanelContext {
@@ -14,7 +14,11 @@ export interface PanelContext {
   back: () => void
   backLabel: string
   openSession: (sessionId: string) => Promise<void>
-  notify: (text: string) => void
+  /**
+   * Shows a notice; `danger` notices stay until dismissed and are announced at once. `action` adds a button to it, such as Undo after
+   * an action that can be reversed, or Retry after one that failed.
+   */
+  notify: (text: string, tone?: ToastTone, action?: { label: string; onClick: () => void }) => void
   restart: () => void
 }
 export interface PanelData {
@@ -26,6 +30,10 @@ export interface PanelData {
   running: number
   /** Incremented each time dsh-superagent recovers from a restart so dependent views refetch. */
   restarts: number
+  /** When the host last confirmed the panel's state (ms since the epoch), so the header can say how current the page is. */
+  updatedAt: number | undefined
+  /** Change the panel's state on screen at once while `action` runs; it goes back if `action` fails (see `usePoll`'s `mutate`). */
+  mutate: <R>(patch: (state: StateView) => StateView, action: () => Promise<R>) => Promise<R>
 }
 const Panel = createContext<PanelContext | undefined>(undefined)
 const PanelState = createContext<PanelData | undefined>(undefined)
@@ -50,12 +58,15 @@ export function useAction<A extends unknown[]>(action: (...args: A) => Promise<u
     running.current = true
     setBusy(true)
     try { await action(...args); await reload?.(); return true }
-    catch (failure) { notify(errorText(failure)); return false }
+    catch (failure) { notify(errorText(failure), 'danger'); return false }
     finally { running.current = false; setBusy(false) }
   }
   return { run, busy }
 }
 
+/** Which live events change the panel's state: every Store write and health change, and only the Assignment steps of `stage`. */
+export const assignmentStep = (event: LiveEvent): boolean => event.topic !== 'stage'
+  || /^assignment\.|^ticket\.(created|ended|resumed)$/.test((event.data as { type?: string } | undefined)?.type ?? '')
 const messages = (t: T): ApiMessages => ({
   offline: t('offline'), notRunning: t('hostNotRunning'), serverError: status => t('serverError', { status }),
     requestFailed: status => t('requestFailed', { status }),
@@ -63,17 +74,10 @@ const messages = (t: T): ApiMessages => ({
   // A refusal names a prompt part by its label.
   user: ({ code, values }) => t(`userError.${code}`, values.part ? { ...values, part: valueLabel(t, 'promptPart', values.part) } : values),
 })
-function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => void; holdMs?: number }) {
-  const done = useRef(onDone)
-  done.current = onDone
-  useEffect(() => { const timer = setTimeout(() => done.current(), holdMs + 1000); return () => clearTimeout(timer) }, [holdMs])
-  return <div className="dt-toast" role="status" style={{ ['--dt-toast-hold' as string]: `${holdMs}ms` }}>{text}</div>
-}
-/** The toasts on screen, oldest first in the page and newest on top on screen; at most three at once. */
-function Toasts({ toasts, onDone }: { toasts: { text: string; id: number }[]; onDone: (id: number) => void }) {
-  if (!toasts.length) return null
-  return createPortal(<div className="dt-toasts">{toasts.map(toast => <Toast key={toast.id} text={toast.text}
-    onDone={() => onDone(toast.id)} />)}</div>, document.body)
+/** Hands the toast API of the library's provider to the panel's `notify`, which lives above it. */
+function ToastBridge({ target }: { target: { current: ToastApi | undefined } }) {
+  target.current = useToast()
+  return null
 }
 const stay = () => {}
 const noSession = async () => {}
@@ -84,23 +88,31 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   live?: string | null
   children: ReactNode
 }) {
-  const [live] = useState(() => liveUrl === null ? null : new LiveClient(liveUrl))
-  useEffect(() => { live?.start(); return () => live?.stop() }, [live])
+  // The page's one connection to the feed, shared with any other provider on it.
+  const [live, setLive] = useState<LiveClient | null>(null)
+  useEffect(() => {
+    if (liveUrl === null) return
+    const held = holdLive(liveUrl)
+    setLive(held.client)
+    return () => { held.release(); setLive(null) }
+  }, [liveUrl])
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
   const call = useMemo(() => caller(() => messages(copy.current)), [])
-  const [toasts, setToasts] = useState<{ text: string; id: number }[]>([])
-  const counter = useRef(0)
-  const notify = useCallback((text: string) => setToasts(current => [...current.filter(item => item.text !== text),
-    { text, id: ++counter.current }].slice(-3)), [])
-  const dismiss = useCallback((id: number) => setToasts(current => current.filter(item => item.id !== id)), [])
+  const toasts = useRef<ToastApi | undefined>(undefined)
+  // The same text replaces its notice rather than stacking it.
+  const notify = useCallback((text: string, tone: ToastTone = 'info', action?: { label: string; onClick: () => void }) => {
+    toasts.current?.show({ id: text, title: text, tone, ...action ? { action } : {} })
+  }, [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
   const [restarting, setRestarting] = useState<{ down: boolean }>()
   const [restarts, setRestarts] = useState(0)
   const restart = useCallback(() => setRestarting({ down: false }), [])
-  const { data: state, error, reload } = usePoll(() => call('GET state'), [call], restarting ? 1000 : interval,
-    restarting ? { client: null } : { live: ['ticket', 'settings', 'health'], client: live })
+  // The header's load and executor slots change when an Assignment starts or ends, which the `stage` topic says even before the
+  // Ticket's own write lands; every other step is left to the views that show it.
+  const { data: state, error, reload, mutate, updatedAt } = usePoll(() => call('GET state'), [call], restarting ? 1000 : interval,
+    restarting ? { client: null } : { live: ['ticket', 'settings', 'health', 'stage'], client: live, filter: assignmentStep })
   if (restarting && !!error !== restarting.down) {
     setRestarting(error ? { down: true } : undefined)
     if (!error) setRestarts(restarts + 1)
@@ -112,11 +124,11 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   }, [restarting])
   const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart }), [t, call, navigate, back, backLabel,
     openSession, notify, restart])
-  const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
-    reload, restarts])
+  const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts, updatedAt, mutate }),
+    [state, error, reload, restarts, updatedAt, mutate])
   return <Panel.Provider value={context}><PanelState.Provider value={data}><LiveContext.Provider value={live}>
+    <style>{UI_STYLES}</style>
     <style>{STYLES}</style>
-    {children}
-    <Toasts toasts={toasts} onDone={dismiss} />
+    <ToastProvider closeLabel={t('close')}><ToastBridge target={toasts} />{children}</ToastProvider>
   </LiveContext.Provider></PanelState.Provider></Panel.Provider>
 }

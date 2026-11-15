@@ -5,16 +5,19 @@ import type { PromptConfig, PromptsView } from './api.ts'
 import { SaveBar, useDraft, type DraftWords } from './draft.tsx'
 import { changedSections, isPart, isSkill, lineDiff, partKey, partText, partWith, sectionLabel, sectionText, skillNameFree, withOverride,
   withOverrides, withSection, withoutSkill, type BuiltInPart, type DiffLine } from './prompt-config.ts'
-import { useAction, usePanel } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
+import { useLive } from './live.ts'
 import { errorText, valueLabel, when, type T } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
-import { Button, Icon, Input, SegmentedControl } from './controls.tsx'
 import { promptNodes, type PipelineNode } from './pipeline.ts'
 import { useReportFocus } from './pipeline-view.tsx'
 import { CodeEditor } from './code-editor.tsx'
-import { PresetSwatch, PromptPresetBar, presetHue, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
+import { PresetSwatch, PromptPresetBar, presetMarks, usePresetLibrary, type PresetRow } from './prompt-presets.tsx'
+import { PackLayerEditor, PresetLayerEditor, PromptAssembly, isPackLayer, isPresetLayer, layerLabel, presetLayer, useAssembly, usePackLibrary,
+  type AssemblyRole } from './prompt-assembly.tsx'
+import { Badge, ControlGroup, FieldError, FormField, IconButton, Tabs, TabPanel, Button, Icon, Input, SegmentedControl, Select } from './ui/index.ts'
 
-type Tab = 'edit' | 'full' | 'history'
+type Tab = 'edit' | 'assembly' | 'full' | 'history'
 type Origin = { revision: number } | 'defaults' | { reset: string }
 interface PromptNote { from?: Origin; selection?: string }
 const originText = (t: T, view: PromptsView, from: Origin | undefined): string | undefined => from === undefined ? undefined
@@ -25,15 +28,18 @@ export function PromptsPage() {
   const { call } = usePanel()
   const [view, setView] = useState<PromptsView>()
   const [error, setError] = useState<Error>()
-  const reload = useCallback(async () => { setView(await call('GET prompts')) }, [call])
-  useEffect(() => { reload().catch(setError) }, [reload])
-  return view ? <PromptsEditor view={view} reload={reload} /> : <LoadState loading error={error} />
+  const { restarts } = usePanelData()
+  const reload = useCallback(async () => { setView(await call('GET prompts')); setError(undefined) }, [call])
+  useEffect(() => { reload().catch(setError) }, [reload, restarts])
+  // Another person's or tab's save reaches the editor while it is open: the draft merges the new revision as it arrives.
+  useLive(['prompts'], () => { reload().catch(setError) })
+  return view ? <PromptsEditor view={view} reload={reload} /> : <LoadState loading error={error} onRetry={() => { reload().catch(setError) }} />
 }
 
 function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Promise<void> }) {
   const { t, call, notify } = usePanel()
   const saved = withOverrides(view.current.config)
-  const draft = useDraft<PromptConfig, PromptNote>({ key: `dsh-superagent/prompts/${view.masterId}`, saved, revision: view.revision,
+  const draft = useDraft<PromptConfig, PromptNote>({ key: 'dsh-superagent/draft/prompts', saved, revision: view.revision,
     reload,
     save: async (config, baseRevision) => {
       const result = await call('PUT prompts', { body: { config, baseRevision } })
@@ -42,20 +48,23 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
     } })
   const config = draft.value
   const [tab, setTab] = useState<Tab>('edit')
+  const [fullChoice, setFullChoice] = useState<FullChoice>({ target: 'orchestrator', compare: undefined })
   const [selection, select] = useState(draft.meta?.selection ?? 'communication')
+  const [role, setRole] = useState<AssemblyRole>('worker')
   // Fall back to the first section when the selected section (e.g., a skill removed by discard) is no longer in the draft.
   const exists = isPart(selection) ? view.parts.some(part => part.key === partKey(selection)) : sectionText(config, selection) !== undefined
   const selected = exists ? selection : 'communication'
   const changed = changedSections(config, saved)
   const edit = (next: PromptConfig, note: PromptNote = {}) => draft.edit(next, { from: note.from ?? draft.meta?.from,
-    selection: note.selection ?? selected })
+    selection: note.selection ?? selection })
   const open = (name: string) => { select(name); setTab('edit') }
   const words: DraftWords = { merged: revision => t('promptConflict', { revision }),
     conflict: (revision, paths) => t('promptConflictParts', { revision, parts: paths.map(([name, item]) => sectionLabel(t, view,
       item === undefined ? name! : name === 'skills' ? `skill/${item}` : name === 'overrides' ? `part/${item}` : name!)).join(t('listSeparator')) }),
     editing: [t('promptsDraftVersion', { revision: draft.revision }), t('promptChanges', { count: changed.length }),
       originText(t, view, draft.meta?.from)].filter(Boolean).join(' · ') }
-  const tabs = [{ value: 'edit' as const, label: t('promptViewEdit') }, { value: 'full' as const, label: t('promptViewFull') },
+  const tabs = [{ value: 'edit' as const, label: t('promptViewEdit') }, { value: 'assembly' as const, label: t('promptViewAssembly') },
+    { value: 'full' as const, label: t('promptViewFull') },
     { value: 'history' as const, label: t('promptViewHistory') }]
   const removed = view.defaultChanged.filter(item => item.removed).map(item => item.part)
   const presets = usePresetLibrary()
@@ -63,16 +72,20 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
   return <div className="dt-form">
     <PromptPresetBar config={config} library={presets.library} error={presets.error} reload={presets.reload}
       onChange={next => { const { presets: _old, ...rest } = config; edit(next.length ? { ...rest, presets: next } : rest) }} />
-    <div className="dt-subtabs" role="tablist" aria-label={t('promptViews')}>{tabs.map(item => <button key={item.value} type="button"
-      role="tab" className="dt-subtab" aria-selected={tab === item.value} onClick={() => setTab(item.value)}>{item.label}</button>)}</div>
+    <Tabs className="dt-subtabs" size="sm" idBase="dt-prompt-view" label={t('promptViews')} value={tab} onChange={setTab} items={tabs} />
     {removed.length > 0 && <Hint>{t('promptRemovedParts', { parts: removed.join(t('listSeparator')) })}</Hint>}
-    {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit}
-      marks={marks} />}
-    {tab === 'full' && <FullPrompt config={config} view={view} dirty={draft.dirty} revision={draft.revision} onEdit={open} />}
-    {tab === 'history' && <PromptHistory key={view.revision} view={view} from={draft.meta?.from}
-      onLoad={(next, from) => edit(withOverrides(next, view.parts), { from })} />}
+    <TabPanel idBase="dt-prompt-view" value={tab} active className="dt-subpanel">
+      {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit}
+        marks={marks} />}
+      {tab === 'assembly' && <Assembly config={config} view={view} selected={selection} onSelect={select} onEdit={edit} presets={presets}
+        role={role} onRole={setRole} />}
+      {tab === 'full' && <FullPrompt config={config} view={view} dirty={draft.dirty} revision={draft.revision} onEdit={open} choice={fullChoice}
+        onChoice={setFullChoice} />}
+      {tab === 'history' && <PromptHistory key={view.revision} view={view} from={draft.meta?.from}
+        onLoad={(next, from) => edit(withOverrides(next, view.parts), { from })} />}
+    </TabPanel>
     <SaveBar {...draft} words={words} onSave={() => { void draft.submit() }}
-      onDiscard={() => { draft.discard(); reload().catch(failure => notify(errorText(failure))) }} />
+      onDiscard={() => { draft.discard(); reload().catch(failure => notify(errorText(failure), 'danger')) }} />
   </div>
 }
 
@@ -85,7 +98,7 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
   const report = useReportFocus()
   useEffect(() => {
     const marks = pipelineOf(view, selected, sectionLabel(t, view, selected))
-    report({ nodes: marks['data-pipeline-nodes'].split(',') as PipelineNode[], trail: [marks['data-pipeline-title']] })
+    report({ nodes: marks['data-pipeline-nodes'].split(',') as PipelineNode[], trail: [marks['data-pipeline-title']], part: 'prompt' })
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
   const swatches = (section: string) => marks[section]?.length ? <span className="dt-preset-swatches" aria-label={t('promptPresetWrites',
     { names: marks[section]!.map(preset => preset.name).join(t('listSeparator')) })}>{marks[section]!.map(preset => <PresetSwatch
@@ -104,7 +117,7 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
     onEdit(withSection(config, section, ''), { selection: section }); onSelect(section)
   }
   const part = isPart(selected) ? view.parts.find(item => item.key === partKey(selected)) : undefined
-  return <><PromptStack config={config} view={view} selected={selected} onSelect={onSelect} marks={marks} /><div className="dt-prompt">
+  return <><div className="dt-prompt">
     <nav className="dt-prompt-nav" aria-label={t('promptSections')}>
       <div className="dt-nav-group">{t('promptTeamGroup')}</div>
       {view.sections.map(section => item(section, <>
@@ -120,9 +133,11 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
       {Object.keys(config.skills).map(skill => item(`skill/${skill}`, <span>{sectionLabel(t, view, `skill/${skill}`)}{unsaved(
         `skill/${skill}`)}{swatches(`skill/${skill}`)}</span>))}
       <form className="dt-add-skill" onSubmit={add}>
-        <Input value={name} placeholder={t('promptSkillName')} aria-label={t('promptAddSkill')} spellCheck={false}
-          onChange={event => { setName(event.target.value); setInvalid(false) }} />
-        {invalid && <p className="dt-error" role="alert">{t('promptSkillNameInvalid')}</p>}
+        <FormField>
+          <Input value={name} placeholder={t('promptSkillName')} aria-label={t('promptAddSkill')} spellCheck={false}
+            onChange={event => { setName(event.target.value); setInvalid(false) }} />
+          {invalid && <FieldError className="dt-error">{t('promptSkillNameInvalid')}</FieldError>}
+        </FormField>
         <Button variant="ghost" size="sm" type="submit" icon={<Icon name="plus" />}>{t('promptAddSkillAction')}</Button>
       </form>
     </nav>
@@ -134,47 +149,43 @@ function PromptSections({ config, view, changed, selected, onSelect, onEdit, mar
 function pipelineOf(view: PromptsView, section: string, title: string) {
   const part = isPart(section) ? view.parts.find(item => item.key === partKey(section)) : undefined
   const roles = part && !part.key.startsWith('skill/') ? part.roles : undefined
-  return { 'data-pipeline-block': 'prompt', 'data-pipeline-nodes': promptNodes(section, roles).join(','), 'data-pipeline-title': title }
-}
-type Role = 'orchestrator' | 'worker'
-/** The parts of a role's prompt in the order its Session reads them, each by the editor's name for it. */
-function roleParts(view: PromptsView, role: Role): string[] {
-  const has = (key: string) => view.parts.some(part => part.key === key)
-  return [`part/runtime/shared`, `part/runtime/${role}`, ...view.sections, 'part/runtime/subscriptions', 'part/runtime/replies',
-    role === 'orchestrator' ? 'part/runtime/dispatch' : 'part/runtime/work', ...role === 'orchestrator' ? ['part/runtime/admission'] : [],
-    `part/runtime/handoff/${role}`, 'part/runtime/environment', ...role === 'orchestrator' ? ['part/runtime/policy'] : []]
-    .filter(name => !isPart(name) || has(partKey(name)))
+  return { 'data-pipeline-block': 'prompt', 'data-pipeline-part': 'prompt', 'data-pipeline-nodes': promptNodes(section, roles).join(','), 'data-pipeline-title': title }
 }
 /**
- * Each Session's prompt as a bar of its parts in reading order, each as wide as its text, coloured by who wrote it (built in,
- * the team, a preset), the part being edited outlined: where the section in the editor sits in what each Session reads.
+ * The assembly view of the Prompts settings: the chosen role's final prompt as a stack of its layers beside the editor of the
+ * layer clicked, which is the prompt draft's for a team section or a built-in part, and the library's for a preset or a pack.
  */
-function PromptStack({ config, view, selected, onSelect, marks }: {
-  config: PromptConfig; view: PromptsView; selected: string; onSelect: (name: string) => void; marks: Record<string, PresetRow[]>
+function Assembly({ config, view, selected, onSelect, onEdit, presets, role, onRole }: {
+  config: PromptConfig; view: PromptsView; selected: string; onSelect: (name: string) => void
+  onEdit: (next: PromptConfig, note?: PromptNote) => void; presets: ReturnType<typeof usePresetLibrary>
+  role: AssemblyRole; onRole: (role: AssemblyRole) => void
 }) {
   const { t } = usePanel()
-  const size = (name: string) => {
-    const part = isPart(name) ? view.parts.find(item => item.key === partKey(name)) : undefined
-    return Math.max(80, (part ? partText(config, part) : sectionText(config, name) ?? '').length)
-  }
-  const origin = (name: string) => marks[name]?.length ? 'preset' : isPart(name) ? (config.overrides?.[partKey(name)] ? 'team' : 'builtin')
-    : 'team'
-  return <div className="dt-stack" aria-label={t('promptStack')}>
-    {(['orchestrator', 'worker'] as const).map(role => {
-      const names = roleParts(view, role), total = names.reduce((sum, name) => sum + size(name), 0)
-      return <div key={role} className="dt-stack-row">
-        <span className="dt-stack-role">{valueLabel(t, 'promptRole', role)}</span>
-        <div className="dt-stack-bar">{names.map(name => {
-          const preset = marks[name]?.at(-1)
-          return <button key={name} type="button" className="dt-stack-seg" data-origin={origin(name)} aria-current={name === selected || undefined}
-            style={{ flexGrow: size(name) / total, ...preset ? { ['--dt-hue' as string]: presetHue(preset.id) } : {} }}
-            title={`${sectionLabel(t, view, name)} · ${t(`promptOrigin.${origin(name)}`)} · ${size(name)}`} aria-label={sectionLabel(t, view, name)}
-            onClick={() => onSelect(name)} />
-        })}</div>
-      </div>
-    })}
-    <span className="dt-stack-legend">{(['builtin', 'team', 'preset'] as const).map(kind => <span key={kind} className="dt-stack-key"
-      data-origin={kind}>{t(`promptOrigin.${kind}`)}</span>)}</span>
+  const packs = usePackLibrary()
+  const { preview, error, retry } = useAssembly(config, `${presets.library?.revision ?? ''}:${packs.data?.revision ?? ''}`)
+  const layers = preview?.layers[role]
+  const report = useReportFocus()
+  // The map follows the layer opened, as it follows the section list.
+  useEffect(() => {
+    // A pack's instructions light that pack's own layer under the role's step on the map, not just the prompt.
+    if (isPackLayer(selected)) { report({ nodes: [role === 'worker' ? 'executor' : 'main'], trail: [layerLabel(t, view, { section: selected },
+      presets.library, packs.data)], part: `${role === 'worker' ? 'executor' : 'main'}-pack:${selected.slice(5)}` }); return }
+    const section = isPresetLayer(selected) ? presetLayer(selected).path : selected
+    const marks = pipelineOf(view, section, layerLabel(t, view, { section: selected }, presets.library, packs.data))
+    report({ nodes: marks['data-pipeline-nodes'].split(',') as PipelineNode[], trail: [marks['data-pipeline-title']], part: 'prompt' })
+  }, [selected, role]) // eslint-disable-line react-hooks/exhaustive-deps
+  // A section this role's prompt does not hold (the other role's part) still opens, as the stack of either role may have chosen it.
+  const known = isPresetLayer(selected) || isPackLayer(selected) || (isPart(selected) ? view.parts.some(part => part.key === partKey(selected))
+    : sectionText(config, selected) !== undefined)
+  const shown = known ? selected : layers?.[0]?.section ?? 'communication'
+  const part = isPart(shown) ? view.parts.find(item => item.key === partKey(shown)) : undefined
+  return <div className="dt-asm">
+    <PromptAssembly view={view} role={role} onRole={onRole} layers={layers} selected={shown} onSelect={onSelect}
+      presets={presets.library} packs={packs.data} error={error} onRetry={retry} />
+    {isPresetLayer(shown) ? <PresetLayerEditor view={view} section={shown} library={presets.library} reload={presets.reload} />
+      : isPackLayer(shown) ? <PackLayerEditor section={shown} library={packs.data} reload={async () => { await packs.reload() }} />
+      : part ? <BuiltInEditor config={config} view={view} part={part} onEdit={onEdit} />
+      : <TeamEditor config={config} view={view} selected={shown} onSelect={onSelect} onEdit={onEdit} />}
   </div>
 }
 /** Whether an override was edited from a built-in text that has changed since. */
@@ -185,16 +196,27 @@ const updated = (config: PromptConfig, part: BuiltInPart): boolean => {
 function TeamEditor({ config, view, selected, onSelect, onEdit }: {
   config: PromptConfig; view: PromptsView; selected: string; onSelect: (name: string) => void; onEdit: (next: PromptConfig, note?: PromptNote) => void
 }) {
-  const { t } = usePanel()
+  const { t, notify } = usePanel()
   const text = sectionText(config, selected) ?? ''
   const fallback = sectionText(view.defaults, selected)
   return <div className="dt-prompt-main" {...pipelineOf(view, selected, sectionLabel(t, view, selected))}>
     <div className="dt-subhead"><h3 className="dt-section-title">{sectionLabel(t, view, selected)}</h3>
       <span className="dt-actions">{isSkill(selected)
-        ? <Button variant="outline" size="sm" icon={<Icon name="trash" />} onClick={() => { onEdit(withoutSkill(config, selected),
-          { selection: 'communication' }); onSelect('communication') }}>{t('remove')}</Button>
-        : <Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={fallback === text}
-          onClick={() => onEdit(withSection(config, selected, fallback ?? ''), { from: { reset: selected } })}>
+        ? <Button variant="secondary" size="sm" icon={<Icon name="trash" />} onClick={() => {
+          // The selection moves to the skill beside it, and the notice can put the skill back (PRM-3).
+          const skills = Object.keys(config.skills).map(name => `skill/${name}`)
+          const at = skills.indexOf(selected)
+          const next = skills[at + 1] ?? skills[at - 1] ?? 'communication'
+          onEdit(withoutSkill(config, selected), { selection: next }); onSelect(next)
+          requestAnimationFrame(() => document.querySelector<HTMLElement>('.dt-prompt-nav [aria-current="true"], .dt-prompt-nav [aria-current="page"]')?.focus())
+          notify(t('promptSkillRemoved', { name: sectionLabel(t, view, selected) }), 'info', { label: t('undo'),
+            onClick: () => { onEdit(config, { selection: selected }); onSelect(selected) } })
+        }}>{t('remove')}</Button>
+        : <Button variant="secondary" size="sm" icon={<Icon name="refresh" />} disabled={fallback === text}
+          onClick={() => {
+            onEdit(withSection(config, selected, fallback ?? ''), { from: { reset: selected } })
+            notify(t('promptSectionReset', { name: sectionLabel(t, view, selected) }), 'info', { label: t('undo'), onClick: () => onEdit(config) })
+          }}>
           {t('promptResetSection')}
         </Button>}
     </span></div>
@@ -220,7 +242,7 @@ function BuiltInEditor({ config, view, part, onEdit }: {
     : `promptReadBy.${part.roles[0]!}` as const
   return <div className="dt-prompt-main" {...pipelineOf(view, name, sectionLabel(t, view, name))}>
     <div className="dt-subhead"><h3 className="dt-section-title">{sectionLabel(t, view, name)}</h3>
-      <span className="dt-actions"><Button variant="outline" size="sm" icon={<Icon name="refresh" />} disabled={!config.overrides?.[part.key]}
+      <span className="dt-actions"><Button variant="secondary" size="sm" icon={<Icon name="refresh" />} disabled={!config.overrides?.[part.key]}
         onClick={reset}>{t('promptResetSection')}</Button></span></div>
     <Hint>{t(readBy)}</Hint>
     {part.placeholders && <Hint>{t('promptTemplateHint', { placeholders: part.placeholders.join(t('listSeparator')) })}</Hint>}
@@ -230,9 +252,9 @@ function BuiltInEditor({ config, view, part, onEdit }: {
       {previous !== undefined ? <><Hint>{t('promptDefaultUpdatedKnown')}</Hint><Diff lines={lineDiff(previous, part.text)} /></>
         : <><Hint>{t('promptDefaultUpdatedUnknown')}</Hint><Diff lines={lineDiff(partText(config, part), part.text)} /></>}
       <span className="dt-actions">
-        <Button variant="outline" size="sm" onClick={() => onEdit(withOverride(config, part, partText(config, part), true))}>
+        <Button variant="secondary" size="sm" onClick={() => onEdit(withOverride(config, part, partText(config, part), true))}>
           {t('promptKeepMine')}</Button>
-        <Button variant="outline" size="sm" onClick={reset}>{t('promptTakeDefault')}</Button>
+        <Button variant="secondary" size="sm" onClick={reset}>{t('promptTakeDefault')}</Button>
       </span>
     </section>}
     <CodeEditor key={part.key} className="dt-editor" label={t('promptBody')} value={partText(config, part)} minLines={18}
@@ -245,12 +267,18 @@ type Target = 'orchestrator' | 'worker' | `skill/${string}`
 /** How long the full prompt waits after the last edit before it composes again. */
 const PREVIEW_SETTLE = 400
 const KIND_LABEL = { team: 'promptPartTeam', fixed: 'promptPartFixed', generated: 'promptPartGenerated' } as const
-function FullPrompt({ config, view, dirty, revision, onEdit }: {
+/** What the full prompt view shows, kept by the editor so leaving the view and coming back keeps the choice (PRM-2). */
+interface FullChoice { target: Target; compare: 'saved' | 'default' | undefined }
+function FullPrompt({ config, view, dirty, revision, onEdit, choice, onChoice }: {
   config: PromptConfig; view: PromptsView; dirty: boolean; revision: number; onEdit: (name: string) => void
+  choice: FullChoice; onChoice: (next: FullChoice) => void
 }) {
   const { t, call, notify } = usePanel()
-  const [target, setTarget] = useState<Target>('orchestrator')
-  const [compare, setCompare] = useState<'saved' | 'default'>(dirty ? 'saved' : 'default')
+  const { target } = choice
+  const setTarget = (next: Target) => onChoice({ ...choice, target: next })
+  const compare = choice.compare ?? (dirty ? 'saved' : 'default')
+  const setCompare = (next: 'saved' | 'default') => onChoice({ ...choice, compare: next })
+  const [attempt, setAttempt] = useState(0)
   // Keep the preview paired with the config it was composed from so diffs stay consistent until the next preview arrives.
   const [preview, setPreview] = useState<{ config: PromptConfig; value: Preview }>()
   const [error, setError] = useState<Error>()
@@ -267,8 +295,9 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
     }, first.current ? 0 : PREVIEW_SETTLE)
     first.current = false
     return () => { clearTimeout(timer); abort.abort() }
-  }, [call, config])
-  if (!preview || error) return <LoadState loading error={error} />
+  }, [call, config, attempt])
+  // A failed preview keeps the last one on screen, dimmed, with the error and a retry at its head.
+  if (!preview) return <LoadState loading error={error} onRetry={() => setAttempt(attempt + 1)} />
   const shown = dirty ? compare : 'default'
   // A built-in skill is a built-in part, by its key.
   const team = isSkill(target) && Object.hasOwn(preview.config.skills, target.slice(6))
@@ -278,20 +307,18 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
   const builtIn = (key: string) => view.parts.find(part => part.key === key)
   return <>
     <div className="dt-subhead">
-      <select className="dt-select dt-inline-select" aria-label={t('promptPreviewTarget')} value={target}
-        onChange={event => setTarget(event.target.value as Target)}>
-        <option value="orchestrator">{valueLabel(t, 'promptRole', 'orchestrator')}</option>
-        <option value="worker">{valueLabel(t, 'promptRole', 'worker')}</option>
-        {Object.keys(preview.value.skills).map(name => <option key={name} value={`skill/${name}`}>{sectionLabel(t, view,
-          `skill/${name}`)}</option>)}
-      </select>
+      <Select size="sm" className="dt-select dt-inline-select" label={t('promptPreviewTarget')} value={target} onChange={next => setTarget(next as Target)}
+        options={[{ value: 'orchestrator', label: valueLabel(t, 'promptRole', 'orchestrator') }, { value: 'worker', label: valueLabel(t, 'promptRole',
+          'worker') }, ...Object.keys(preview.value.skills).map(name => ({ value: `skill/${name}`, label: sectionLabel(t, view, `skill/${name}`) }))]} />
       <Hint>{t('promptFullState', { count: parts.length, chars: parts.reduce((sum, part) => sum + part.text.length, 0),
         state: dirty ? t('promptPreviewDraft') : t('promptPreviewSaved', { revision }) })}</Hint>
-      <span className="dt-sync" data-busy={composing || undefined} role="status">{t(composing ? 'promptComposing' : 'promptComposed')}</span>
-      <SegmentedControl className="dt-segmented dt-compare" label={t('promptCompare')} value={shown} options={[...dirty
+      {error ? <span className="dt-preview-failed" role="alert"><Badge tone="danger" title={error.message}>{t('promptPreviewFailed')}</Badge>
+        <IconButton icon="refresh" size="sm" label={t('retry')} onClick={() => setAttempt(attempt + 1)} /></span>
+        : <span className="dt-sync" data-busy={composing || undefined} role="status">{t(composing ? 'promptComposing' : 'promptComposed')}</span>}
+      <SegmentedControl className="dt-compare" label={t('promptCompare')} value={shown} options={[...dirty
         ? [{ value: 'saved' as const, label: t('promptCompareSaved') }] : [], { value: 'default' as const,
           label: t('promptCompareDefault') }]} onChange={setCompare} />
-      <Button variant="outline" size="sm" icon={<Icon name="copy" />} onClick={() => {
+      <Button variant="secondary" size="sm" icon={<Icon name="copy" />} onClick={() => {
         void navigator.clipboard.writeText(parts.map(part => part.text).join('\n\n')).then(() => notify(t('copied')))
       }}>{t('promptCopyAll')}</Button>
     </div>
@@ -353,20 +380,20 @@ function PromptHistory({ view, from, onLoad }: {
         <div className="dt-row-meta">{version.changed.length ? t('promptHistoryChanged', { parts: version.changed.map(name =>
           sectionLabel(t, view, name)).join(t('listSeparator')) }) : t('promptHistoryNone')}</div>
       </div>
-      <div className="dt-row-actions"><Button variant="outline" size="sm" icon={<Icon name="history" />}
+      <div className="dt-row-actions"><Button variant="secondary" size="sm" icon={<Icon name="history" />}
         disabled={load.busy || (typeof from === 'object' && 'revision' in from && from.revision === version.revision)}
         onClick={() => { void load.run(version.revision) }}>{t('promptRestore')}</Button></div>
     </li>)}</ul>
     <div className="dt-actions">
-      {next !== null && <Button variant="outline" size="sm" icon={<Icon name="chevron-down" />} disabled={more.busy}
+      {next !== null && <Button variant="secondary" size="sm" icon={<Icon name="chevron-down" />} disabled={more.busy}
         onClick={() => { void more.run(next) }}>{t('promptOlder')}</Button>}
-      <Button variant="outline" size="sm" icon={<Icon name="refresh" />}
+      <Button variant="secondary" size="sm" icon={<Icon name="refresh" />}
         onClick={() => onLoad(view.defaults, 'defaults')}>{t('promptDefaults')}</Button>
     </div>
-    <div className="dt-field"><span>{t('promptSessions')}</span>
+    <ControlGroup className="dt-field" label={t('promptSessions')}>
       {view.sessions.length ? <ul className="dt-changes dt-mono">{view.sessions.map(item => <li
         key={item.sessionId}>{t('promptSessionItem', { session: item.sessionId, revision: item.revision })}</li>)}</ul>
         : <Hint>{t('promptNoSessions')}</Hint>}
-    </div>
+    </ControlGroup>
   </div>
 }

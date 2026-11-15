@@ -11,6 +11,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { PresetConflict } from './prompt-presets.ts'
+import { OverlayConflict } from './agent-overlays.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
@@ -37,7 +38,7 @@ export interface HttpHost {
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'preview' | 'save' | 'defaultChanged' | 'presets'>
-  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'agentPresets'>
+  readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'agentPresets' | 'overlays'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels' | 'saveInstances'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount'>
@@ -116,7 +117,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
-  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof PresetConflict) return [409, { error: error.message }]
+  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof PresetConflict || error instanceof OverlayConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -170,7 +171,7 @@ const limit = (fallback: number, max: number) => z.coerce.number().int().positiv
 const TicketsQuery = z.object({ state: z.enum(TICKET_FILTERS).catch('open'), offset, limit: limit(20, 1000) })
 const ThreadsQuery = z.object({ filter: z.enum(THREAD_FILTERS).catch('subscribed'), offset, limit: limit(20, 1000) })
 const ThreadQuery = z.object({ limit: limit(50, 100), before: z.string().optional(), around: z.string().optional() })
-const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.literal('24h').optional().catch(undefined), offset,
+const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.enum(['24h', '7d']).optional().catch(undefined), offset,
   limit: limit(30, 200) })
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
@@ -211,7 +212,7 @@ function routes(runtime: HttpHost): Routes {
     },
     'GET decisions': ({ query }) => {
       const { kind, window, offset, limit } = DecisionsQuery.parse(query)
-      const since = window ? new Date(Date.now() - 86_400_000).toISOString() : ''
+      const since = window ? new Date(Date.now() - (window === '7d' ? 7 : 1) * 86_400_000).toISOString() : ''
       return decisionList(views(runtime), kind.split(',').filter(Boolean), offset, limit, since)
     },
     'POST decisions/:id/dismiss': ({ params }) => { runtime.engine.dismiss(params.id); return { dismissed: true } },
@@ -245,12 +246,34 @@ function routes(runtime: HttpHost): Routes {
       const settings = store.settings()
       return { presets: runtime.sessions.agentPresets(), selected: { worker: settings.executor.agentPreset, orchestrator: settings.eval.agentPreset } }
     },
+    'GET agent-overlays': () => {
+      const settings = store.settings()
+      return { ...runtime.sessions.overlays.view(),
+        selected: { worker: settings.executor.overlays, orchestrator: settings.eval.overlays } }
+    },
+    'PUT agent-overlays': async input => {
+      const request = z.object({ overlays: z.array(z.unknown()), revision: z.number().int().nonnegative() }).parse(await promptBody(input))
+      return runtime.sessions.overlays.save(request.overlays, request.revision)
+    },
+    'POST agent-overlays/effective': async input => {
+      const request = z.object({ role: z.enum(['worker', 'orchestrator']), overlays: z.array(z.string()).max(16) }).parse(await promptBody(input))
+      return runtime.sessions.overlays.effective(request.role, request.overlays)
+    },
     'GET prompts': ({ query }) => { const { revision, offset } = PromptsQuery.parse(query); return promptsView(runtime, revision, offset) },
     'PUT prompts': async input => {
       const request = z.object({ config: z.unknown(), baseRevision: z.number().int().nonnegative() }).parse(await promptBody(input))
       return savePrompts(runtime, request.config, request.baseRevision, 'panel')
     },
-    'POST prompts/preview': async input => runtime.prompts.preview(await promptBody(input)),
+    'POST prompts/preview': async input => {
+      const body = await promptBody(input)
+      // The capability packs each role's Sessions add after the prompt, as the settings turn them on now.
+      const settings = store.settings()
+      const packs = (role: 'orchestrator' | 'worker') => {
+        try { return runtime.sessions.overlays.effective(role, role === 'worker' ? settings.executor.overlays : settings.eval.overlays).instructions }
+        catch { return [] }
+      }
+      return runtime.prompts.preview(body, { orchestrator: packs('orchestrator'), worker: packs('worker') })
+    },
     'GET prompt-presets': () => runtime.prompts.presets.view(),
     'PUT prompt-presets': async input => {
       const request = z.object({ presets: z.array(z.unknown()), revision: z.number().int().nonnegative() }).parse(await promptBody(input))
