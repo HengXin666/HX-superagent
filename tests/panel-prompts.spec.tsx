@@ -46,7 +46,7 @@ it('shows a built-in skill with the CLI notes in the full prompt, editable as a 
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
   await click(tab(zh.promptViewFull))
-  await act(async () => { const select = field<HTMLSelectElement>(zh.promptPreviewTarget); select.value = 'skill/github'; select.dispatchEvent(new Event('change', { bubbles: true })) }); await settle()
+  await type(document.querySelector(`.dt-select[aria-label="${zh.promptPreviewTarget}"]`)!, 'skill/github')
   expect(text()).toContain('## CLI usage')
   expect(all('.dt-preview-part[data-editable] b').map(name => name.textContent)).toEqual([zh['promptPart.skill/github']])
   await click(tab(zh.promptViewEdit))
@@ -276,21 +276,72 @@ it('writes a team preset in the library and saves it against the library\'s revi
     patch: { communication: 'Ship on Fridays.' } }] })
 })
 
-it('lights the steps whose Session reads the prompt part being edited, with its line, and shows where it sits in each prompt', async () => {
+it('lights the steps whose Session reads the prompt part being edited, with its line, from the layer opened in the assembly', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
+  await click(tab(zh.promptViewAssembly))
   const node = (name: string) => document.querySelector<HTMLElement>(`.dt-pipeline-node[data-node="${name}"]`)!
-  await click(all('.dt-stack-seg').find(item => item.getAttribute('aria-label') === zh['promptPart.runtime/work'])!)
+  const layer = (section: string) => document.querySelector<HTMLElement>(`.dt-asm-layer[data-section="${section}"]`)!
+  await click(layer('part/runtime/work'))
   expect(node('executor').getAttribute('aria-current')).toBe('step')
   expect(node('main').getAttribute('aria-current')).toBeNull()
-  expect(document.querySelector('.dt-stack-seg[aria-current="true"]')?.getAttribute('aria-label')).toBe(zh['promptPart.runtime/work'])
+  expect(layer('part/runtime/work').getAttribute('aria-current')).toBe('true')
   const body = field<HTMLTextAreaElement>(zh.promptBody)
   await act(async () => { body.focus(); body.setSelectionRange(body.value.indexOf('\n') + 1, body.value.indexOf('\n') + 1) })
   await act(async () => { body.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true })) })
   expect(all('.dt-pipeline-crumb').at(-1)?.textContent).toBe('L2')
   // A team section is read by both Sessions.
-  await click(all('.dt-stack-seg').find(item => item.getAttribute('aria-label') === '交付要求')!)
-  expect(document.querySelector('.dt-prompt-main .dt-section-title')?.textContent).toBe('交付要求')
+  await click(layer('delivery'))
+  expect(document.querySelector('.dt-asm .dt-section-title')?.textContent).toBe('交付要求')
   await act(async () => { field<HTMLTextAreaElement>(zh.promptBody).focus() })
   expect([node('main'), node('executor')].map(item => item.getAttribute('aria-current'))).toEqual(['step', 'step'])
+})
+
+it('draws a role\'s final prompt as layers in reading order, as wide as their text, with each preset\'s text and pack apart, then the skills', async () => {
+  server.promptPresets = { revision: 1, presets: [{ id: 'tone', name: 'Tone', description: '', mode: 'append',
+    patch: { communication: 'Be brief.', skills: { release: 'Tag releases on Fridays.' } } }] }
+  server.prompts.current = promptVersion(0, { ...defaultPrompts(), communication: 'Say little.', presets: ['tone'] })
+  server.settings.eval.overlays = ['terse-replies']
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  await click(tab(zh.promptViewAssembly))
+  const layers = () => all('.dt-asm-layer').map(item => [item.dataset.section, item.dataset.origin])
+  // The Executor reads its role's parts; the team's text and the preset's appended text are two layers of one section.
+  expect(layers().slice(0, 4)).toEqual([['part/runtime/shared', 'builtin'], ['part/runtime/worker', 'builtin'], ['communication', 'team'],
+    ['preset:tone:communication', 'preset']])
+  expect(layers()).toContainEqual(['part/runtime/work', 'builtin'])
+  expect(layers()).not.toContainEqual(['part/runtime/dispatch', 'builtin'])
+  expect(layers().slice(-2)).toEqual([['part/skill/github', 'builtin'], ['preset:tone:skill/release', 'preset']])
+  const widths = all('.dt-asm-bar').map(bar => parseFloat(bar.style.width))
+  expect(Math.max(...widths)).toBe(100)
+  expect(widths.every(width => width >= 1.5)).toBe(true)
+  // The main Session reads the dispatch part and its pack's instructions after the prompt.
+  await click(zh['promptRole.orchestrator'])
+  expect(layers()).toContainEqual(['part/runtime/dispatch', 'builtin'])
+  expect(layers()).toContainEqual(['pack:terse-replies', 'pack'])
+  // A built-in pack opens read-only beside the stack.
+  await click(document.querySelector<HTMLElement>('.dt-asm-layer[data-section="pack:terse-replies"]')!)
+  expect(document.querySelector('.dt-asm .dt-section-title')?.textContent).toBe('简洁回复 / Terse replies')
+  expect(field<HTMLTextAreaElement>(zh.promptBody).readOnly).toBe(true)
+  // A preset's layer opens the preset's own text, which saves to the library, not to the prompt draft.
+  await click(document.querySelector<HTMLElement>('.dt-asm-layer[data-section="preset:tone:communication"]')!)
+  expect(field<HTMLTextAreaElement>(zh.promptBody).value).toBe('Be brief.')
+  await type(field<HTMLTextAreaElement>(zh.promptBody), 'Be very brief.')
+  await click(document.querySelector<HTMLElement>('.dt-asm .dt-subhead button')!)
+  expect(server.promptPresets).toMatchObject({ revision: 2, presets: [{ id: 'tone', patch: { communication: 'Be very brief.',
+    skills: { release: 'Tag releases on Fridays.' } } }] })
+  expect(text()).not.toContain('处修改')
+})
+
+it('lights a pack\'s own layer on the map while its instructions are open in the assembly view', async () => {
+  server.settings.eval.overlays = ['terse-replies']
+  at({ page: 'settings', query: { group: 'prompts' } })
+  await mount()
+  await click(tab(zh.promptViewAssembly))
+  await click(zh['promptRole.orchestrator'])
+  await click(document.querySelector<HTMLElement>('.dt-asm-layer[data-section="pack:terse-replies"]')!)
+  const layer = document.querySelector<HTMLElement>('.dt-pipeline-part[data-part="main-pack:terse-replies"]')
+  expect(layer?.getAttribute('aria-current')).toBe('location')
+  expect(document.querySelector('.dt-pipeline-part[data-part="prompt"]')?.getAttribute('aria-current')).toBeNull()
+  expect(document.querySelector('.dt-pipeline-node[data-node="main"]')?.getAttribute('aria-current')).toBe('step')
 })

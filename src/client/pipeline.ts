@@ -20,7 +20,15 @@ export const EDGES: readonly { from: PipelineNode; to: PipelineNode; back?: true
   { from: 'executor', to: 'main', back: true },
 ]
 /** Where a person is editing: the steps it bears on and the trail the map names under them. */
-export interface PipelineFocus { nodes: PipelineNode[]; trail: string[] }
+export interface PipelineFocus { nodes: PipelineNode[]; trail: string[]; part?: string | undefined }
+/** A component inside a step the architecture map draws under it: a Source instance, the Policy, a preset, the packs, the prompt. */
+export interface MapPart { id: string; label: string; value?: string | undefined; state?: 'ongoing' | 'warning' | 'error' | 'idle' | undefined
+  /** The `data-pipeline-part` the component opens and lights with, when several components share one (each preset of a chain). */
+  target?: string | undefined
+  /** A preset's hue, so its layer on the map matches its chip in the settings. */
+  hue?: number | undefined
+  /** How deep in its step's stack the component sits: a preset layer is drawn indented under the base it stacks on. */
+  depth?: number | undefined }
 /** The steps a settings block configures, by the `data-pipeline-block` the panel marks it with. */
 export const BLOCK_NODES: Readonly<Record<string, PipelineNode[]>> = {
   source: ['source', 'reply'], policy: ['policy'], admission: ['policy'], eval: ['main'], executor: ['executor'],
@@ -33,6 +41,19 @@ export function promptNodes(section: string, roles?: readonly Role[]): PipelineN
   return [...read.includes('orchestrator') ? ['main' as const] : [], ...read.includes('worker') ? ['executor' as const] : []]
 }
 /** The steps a settings group configures, which the map marks when nothing is focused. */
-export const groupNodes = (group: SettingsGroup): PipelineNode[] => PIPELINE.filter(node => STEPS[node].group === group)
+export const groupNodes = (group: SettingsGroup): PipelineNode[] => group === 'presets' ? ['main', 'executor']
+  : PIPELINE.filter(node => STEPS[node].group === group)
+/**
+ * The steps a change at `nodes` reaches downstream: every step a message passes through after them along the forward edges,
+ * not counting the steps themselves. The map shades them so a person sees what a setting will affect before saving it.
+ */
+export function impactOf(nodes: readonly PipelineNode[]): PipelineNode[] {
+  const seen = new Set<PipelineNode>(), queue = [...nodes]
+  while (queue.length) {
+    const node = queue.shift()!
+    for (const edge of EDGES) if (!edge.back && edge.from === node && !seen.has(edge.to)) { seen.add(edge.to); queue.push(edge.to) }
+  }
+  return PIPELINE.filter(node => seen.has(node) && !nodes.includes(node))
+}
 /** The line a caret is on in `text`, counting from 1. */
 export const lineAt = (text: string, caret: number): number => text.slice(0, Math.max(0, caret)).split('\n').length

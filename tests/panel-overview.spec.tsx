@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 // The overview.
-import { expect, it } from 'vitest'
+import { act } from 'react'
+import { expect, it, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, text } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, all, find, tab, click, text, settle } from './fixtures/panel.tsx'
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -30,7 +31,15 @@ it('re-evaluates or dismisses an unjudged Eval from the problem list', async () 
   await mount()
   await click(zh.requeue)
   expect(server.requests.some(request => request.path === 'triggers/e3/requeue' && request.method === 'POST')).toBe(true)
-  await click(zh.dismiss)
+  // Dismissing leaves the row at once and offers Undo; the dismissal goes out when the Undo lapses.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    await act(async () => { find(zh.dismiss).click() })
+    expect(text()).not.toContain('评估未完成：这个文案好奇怪')
+    expect(server.requests.some(request => request.path === 'decisions/u1/dismiss')).toBe(false)
+    await act(async () => { vi.advanceTimersByTime(5000) })
+  } finally { vi.useRealTimers() }
+  await settle()
   expect(server.requests.some(request => request.path === 'decisions/u1/dismiss' && request.method === 'POST')).toBe(true)
   expect(server.requests.filter(request => request.path === 'overview').length).toBeGreaterThan(2)
 })
@@ -46,11 +55,16 @@ it('follows the last day\'s counts to the status of each stage', async () => {
   await mount()
   // Arrived Triggers include filtered ones, which have no Thread, so no list has that count to link to.
   expect(all('.dt-stat button').map(button => button.textContent)).toEqual(['2', '1'])
+  // The filtered count opens the filtered messages themselves, in a table over the overview.
   await click(all('.dt-stat button')[0]!)
-  expect(tab(zh['tab.source']).getAttribute('aria-selected')).toBe('true')
+  const drawer = document.querySelector('.hx-drawer')!
+  expect(drawer.textContent).toContain('looks wrong')
+  expect(drawer.textContent).toContain(zh['reason.source_disabled'])
+  // On the Source page they are a table too, behind each Source's disclosure.
+  await click(zh.close)
+  await click(tab(zh['tab.source']))
   await click(zh.sourceFilteredTitle)
   expect(text()).toContain('looks wrong')
-  expect(text()).toContain(zh['reason.source_disabled'])
 })
 
 it('offers each Ticket that needs a person its actions on the overview: answer in its Channel, retry or open a failed worker, and stop',
@@ -59,8 +73,8 @@ it('offers each Ticket that needs a person its actions on the overview: answer i
   expect(all('.dt-ticket-actions a').map(link => [link.textContent, link.getAttribute('href')])).toEqual([['去飞书回答',
     'https://applink.feishu.cn/client/chat/open?openChatId=oc_1']])
   expect(all('.dt-ticket-note').map(note => note.textContent)).toContain('LlmError: no adapter registered for provider "provider-a"')
+  // Retrying harms nothing, so it runs at once.
   await click(zh.retry)
-  await click(zh.confirm)
   expect(server.requests.some(request => request.path === 'tickets/t4/retry' && request.method === 'POST')).toBe(true)
   await click(all('.dt-ticket-actions button').find(button => button.textContent === '打开 Session')!)
   expect(server.opened).toEqual(['worker-t4'])
@@ -79,8 +93,8 @@ it('shows paused processing as a system problem with its resume action, and says
   await click(zh.resumeWhere)
   expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
   await click(zh['tab.overview'])
+  // Resuming can be undone, so it runs at once and its notice offers Undo.
   await click(find(zh.resumeProcessing, '.dt-att button'))
-  await click(zh.confirm)
   expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: false } })
 })
 
@@ -94,7 +108,7 @@ it('offers the step that fixes a settings problem as a button on the overview', 
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.eval'])
 })
 
-it('counts the messages not sent in the last day, linking to the Source status, and shows nothing when there are none', async () => {
+it('counts the messages not sent in the last day, opening them over the overview, and shows nothing when there are none', async () => {
   await mount()
   expect(all('.dt-stat-label').map(label => label.textContent)).not.toContain(zh.flowDroppedLabel)
   server.dropped = [droppedReply('m2', 1, 'feishu', 'channelGone'), droppedReply('m1', 2, 'github', 'channelIgnored'), droppedReply('m0',
@@ -103,7 +117,8 @@ it('counts the messages not sent in the last day, linking to the Source status, 
   const stat = all('.dt-stat').find(item => item.querySelector('.dt-stat-label')?.textContent === zh.flowDroppedLabel)!
   expect(stat.textContent).toBe(`${zh.flowDroppedLabel}2`)
   await click(stat.querySelector('button')!)
-  expect(tab(zh['tab.source'])?.getAttribute('aria-selected')).toBe('true')
+  expect(document.querySelector('.hx-drawer [role="tab"][aria-selected="true"]')?.textContent).toBe(`${zh.sourceDroppedTitle} · 2`)
+  expect(document.querySelectorAll('.hx-drawer tbody tr')).toHaveLength(2)
 })
 
 it('names a failing part of dsh-superagent itself by its label', async () => {
@@ -118,8 +133,8 @@ it('words a refused retry in the interface language by its code', async () => {
   // Simulate another user retrying the ticket after the overview loaded.
   server.person = server.person.map(ticket => ticket.id === 't4' ? { ...ticket, actions: { ...ticket.actions, retry: false } } : ticket)
   await click(find(zh.retry, '.dt-ticket-actions button'))
-  await click(zh.confirm)
-  expect(document.querySelector('.dt-toast')?.textContent).toBe(zh['userError.notRetryable'])
+  // The refusal is a notice that stays until dismissed.
+  expect(document.querySelector('.hx-toast[data-tone="danger"]')?.textContent).toContain(zh['userError.notRetryable'])
   expect(text()).not.toContain('Only an open ticket can be retried, and only when its worker last reported failed or blocked and no person has sent a message since, or when delivering an Input to its worker failed')
 })
 

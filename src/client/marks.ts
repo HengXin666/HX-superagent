@@ -2,7 +2,7 @@
 import type { DecisionRow, SourceStatusRow, ThreadRow, TicketStage, TicketSummary } from './api.ts'
 import type { DshSuperagentKey } from './locales.ts'
 import { valueLabel, type T } from './text.ts'
-import type { DotState, IconName, TagTone } from './controls.tsx'
+import type { DotState, IconName, TagTone } from './ui/index.ts'
 
 export interface Mark { label: string; tone: TagTone; dot: DotState; icon: IconName }
 

@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { Fields } from '../src/client/settings-kit.tsx'
 import { expect, it, onTestFinished } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, enter, press } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -29,11 +29,13 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   await click(zh['mode.auto'])
   await type(field<HTMLInputElement>(zh.evalTimeout), '180')
+  // The model is three linked choices from the host's catalog; a value it does not list can still be typed.
   const [provider, model] = all('.dt-model input')
-  await type(provider as HTMLInputElement, 'worker-provider'); await type(model as HTMLInputElement, 'worker-model')
+  await enter(provider!, 'worker-provider'); await enter(all('.dt-model input')[1]!, 'worker-model')
+  void model
   await click(zh.save)
   expect(server.settings.eval).toEqual({ mode: 'auto', timeoutSeconds: 180, model: { provider: 'worker-provider', model: 'worker-model' },
-    agentPreset: 'dsh-superagent-router' })
+    agentPreset: 'dsh-superagent-router', overlays: [] })
   await click(find(zh['promptPart.runtime/work'], '.dt-settings-link'))
   await type(field<HTMLInputElement>(zh.maxWorkers), '5')
   // An empty root uses the default directory, which the field names instead of looking set.
@@ -49,14 +51,18 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await click('DSH_SUPERAGENT_DIR')
   expect(field<HTMLTextAreaElement>(zh.prepareCommand).value).toBe('git worktree add "$DSH_SUPERAGENT_DIR"')
   await type(field<HTMLInputElement>(zh.blockedCommands), 'gh-personal  gh.other')
-  const [workerProvider, workerModel, effort] = all('.dt-model input')
-  await type(workerProvider as HTMLInputElement, 'worker-provider'); await type(workerModel as HTMLInputElement,
-    'worker-model'); await type(effort as HTMLInputElement, 'high')
-  expect([...document.querySelectorAll('#dt-worker-model-efforts option')].map(option => option.getAttribute('value'))).toEqual(['high'])
+  await enter(all('.dt-model input')[0]!, 'worker-provider')
+  await enter(all('.dt-model input')[1]!, 'worker-model')
+  // The efforts offered are the chosen model's own, after the inherited default.
+  const effort = all('.dt-model input')[2]!
+  await act(async () => { effort.click() })
+  expect(all('[role="option"]').map(option => option.getAttribute('data-value'))).toEqual(['', 'high'])
+  await press(effort, 'Escape')
+  await enter(effort, 'high')
   await click(zh.save)
   expect(server.settings.executor).toEqual({ maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
-      model: 'worker-model', reasoningEffort: 'high' }, agentPreset: 'dsh-superagent-worker' })
+      model: 'worker-model', reasoningEffort: 'high' }, agentPreset: 'dsh-superagent-worker', overlays: [] })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',
     'settings/executor'])
 })
@@ -129,7 +135,7 @@ it('lists the settings groups stages first, opens each stage\'s group from its s
   async () => {
   await mount()
   await click(tab(zh['tab.settings']))
-  expect(all('.dt-settings-link').map(link => link.textContent)).toEqual(['来源', '评估', '执行', '提示词', '部署'])
+  expect(all('.dt-settings-link').map(link => link.textContent)).toEqual(['来源', '评估', '执行', '预设', '提示词', '部署'])
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['term.source'])
   for (const [tab, group] of [['来源', '来源'], ['评估', '评估'], ['执行', '执行']] as const) {
     await click(find(tab, '[role="tab"]'))
@@ -173,7 +179,55 @@ it('draws the dispatch pipeline over the settings, lights the step a focused fie
   expect(node('executor').getAttribute('aria-current')).toBe('step')
   expect(node('main').getAttribute('aria-current')).toBeNull()
   expect(all('.dt-pipeline-crumb').map(item => item.textContent)).toEqual([zh['pipeline.executor'], zh['term.executor'], zh.maxWorkers])
+  // The steps downstream of the edit are shaded and named, so the person sees what saving reaches.
+  expect(node('reply').hasAttribute('data-impact')).toBe(true)
+  expect(node('main').hasAttribute('data-impact')).toBe(false)
+  expect(document.querySelector('.dt-pipeline-impact')?.textContent).toContain(zh['pipeline.reply'])
+  // Under each step the map draws its components from the saved settings, and lights the one being edited.
+  const part = (id: string) => document.querySelector<HTMLElement>(`.dt-pipeline-part[data-part="${id}"]`)!
+  expect(part('executor-preset').textContent).toContain('dsh-superagent-worker')
+  expect(part('main-overlays').textContent).toContain(zh['part.default'])
+  expect(part('executor-slots').getAttribute('aria-current')).toBe('location')
+  expect(part('executor-preset').getAttribute('aria-current')).toBeNull()
+  // A component opens its own settings: the Policy rules on the Eval settings.
+  await click(part('policy'))
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.eval'])
+  await click(find(zh['promptPart.runtime/work'], '.dt-settings-link'))
   // A step opens the settings that configure it.
   await click(node('policy'))
   expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['settingsGroup.eval'])
+})
+
+it('draws the map at the width it is shown at, so every step fits a narrow panel and the edges meet the nodes', async () => {
+  const observers: { callback: ResizeObserverCallback; target?: Element }[] = []
+  const original = globalThis.ResizeObserver
+  globalThis.ResizeObserver = class {
+    entry: { callback: ResizeObserverCallback; target?: Element }
+    constructor(callback: ResizeObserverCallback) { this.entry = { callback }; observers.push(this.entry) }
+    observe(target: Element) { this.entry.target = target }
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+  onTestFinished(() => { globalThis.ResizeObserver = original })
+  await mount()
+  await click(zh['tab.settings'])
+  const resize = async (width: number) => act(async () => {
+    for (const { callback, target } of observers) if (target?.classList.contains('dt-pipeline-scroll'))
+      callback([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver)
+  })
+  const svg = () => document.querySelector<SVGSVGElement>('.dt-pipeline-svg')!
+  const box = () => svg().getAttribute('viewBox')!.split(' ').map(Number)
+  await resize(600)
+  // The drawing is as wide as the panel (no scaling, so a node's middle and its edge sit at the same height) and five steps fit it.
+  expect(box()[2]).toBeCloseTo(600, 0)
+  expect(svg().style.height).toBe(`${box()[3]}px`)
+  const slots = document.querySelector<HTMLElement>('.dt-pipeline-nodes')!
+  const share = parseFloat(slots.style.getPropertyValue('--dt-pipeline-w')), gap = parseFloat(slots.style.getPropertyValue('--dt-pipeline-gap'))
+  expect(share * 5 + gap * 4).toBeCloseTo(100, 1)
+  // A last edge ends inside the drawing.
+  const ends = all('.dt-pipeline-edge:not(.dt-pipeline-back)').map(path => Number(/H(-?[\d.]+)$/.exec(path.getAttribute('d')!)?.[1]))
+  expect(Math.max(...ends)).toBeLessThan(600)
+  // Below the floor it keeps a readable width and scrolls instead of squeezing.
+  await resize(200)
+  expect(box()[2]).toBeCloseTo(360, 0)
 })

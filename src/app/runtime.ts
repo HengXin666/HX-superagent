@@ -142,6 +142,7 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          this.live.stage(event)
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -223,7 +224,9 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
-    this.disposers.push(this.store.onChange(topics => { for (const topic of topics) this.live.emit(topic) }), this.watchActivity())
+    this.disposers.push(this.store.onChange(topics => { for (const topic of topics) this.live.emit(topic) }), this.watchActivity(),
+      // A Source going down or coming back, a model becoming unavailable, setup pending: every open view shows it at once.
+      this.board.onChange(name => { this.live.health(name) }))
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return

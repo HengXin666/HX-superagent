@@ -7,12 +7,12 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { LIMITS } from '../limits.ts'
 import type { SetupView } from './api.ts'
-import { InfoTip, Input } from './controls.tsx'
 import { SaveBar, useDraft } from './draft.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
 import { setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
+import { ControlGroup, Input } from './ui/index.ts'
 
 export type DeploymentForm = ConfigPageForm | undefined
 type Op = Parameters<ConfigPageForm['mutate']>[0][number]
@@ -68,10 +68,9 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </Section>}
       <Section title={t('deploymentMachine')}>
         {readOnlyHint && <Hint>{readOnlyHint}</Hint>}
-        <div className="dt-field">
-          <span className="dt-field-head">{t('deploymentStateDir')}<InfoTip text={t('deploymentStateDirHint')} /></span>
+        <ControlGroup className="dt-field" label={t('deploymentStateDir')} info={t('deploymentStateDirHint')}>
           <span className="dt-mono">{setup.machine.stateDir}</span>
-        </div>
+        </ControlGroup>
       </Section>
       <Section title={t('deploymentLimits')} hint={t('deploymentLimitsHint')}>
         {limit('promptMaxChars', t('deploymentPromptMaxChars'))}

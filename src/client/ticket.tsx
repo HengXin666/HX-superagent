@@ -1,14 +1,14 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
 import { useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
-import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { useAction, usePanel } from './provider.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
+import { Badge, Button, DisclosureRow, Dot, Icon, Tag, type IconName } from './ui/index.ts'
 
 type Input = TicketPageView['inputs'][number]
 function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: string; at: string; preview: string }[] }) {
@@ -61,7 +61,7 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
         {item.endedReason && <span>{reasonLabel(t, item.endedReason)}</span>}
       </div>
     </div>
-    {item.ref && item.ref !== ticket.sessionId && <div className="dt-row-actions"><SessionButton variant="outline"
+    {item.ref && item.ref !== ticket.sessionId && <div className="dt-row-actions"><SessionButton variant="secondary"
       sessionId={item.ref} /></div>}
   </li>)}</ul>
 }
@@ -106,9 +106,18 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 }
 
 export function TicketPage({ id }: { id: string }) {
-  const { t, call } = usePanel()
-  const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id], undefined, { live: ['ticket', 'outbox', 'activity'] })
-  const after = async (request: Promise<unknown>) => { await request; await reload() }
+  const { t, call, notify } = usePanel()
+  const { data, error, mutate } = usePoll(() => call('GET tickets/:id', { id }), [id], undefined, { live: ['ticket', 'outbox', 'activity', 'stage'],
+    // Only this Ticket's own Sessions' activity and steps reload it, not every tool call of every Session.
+    filter: event => (event.topic !== 'activity' && event.topic !== 'stage') || (event.data as { ticketId?: string }).ticketId === id })
+  // Stop and Retry act on the page at once: their buttons give way to what is happening, and come back if the host refuses.
+  const [pending, setPending] = useState<'stop' | 'retry'>()
+  const act = async (kind: 'stop' | 'retry', request: () => Promise<unknown>) => {
+    setPending(kind)
+    try { await mutate(ticket => ({ ...ticket, actions: { ...ticket.actions, stop: false, retry: false } }), request) }
+    finally { setPending(undefined) }
+  }
+  const retry = useAction(async () => { await act('retry', () => call('POST tickets/:id/retry', { id })); notify(t('retryStarted')) })
   if (!data) return <><PageHead
     title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : <LoadState
       error={error} loading />}</>
@@ -128,12 +137,15 @@ export function TicketPage({ id }: { id: string }) {
   return <>
     <PageHead title={data.title}>
       {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
-      {data.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
-        message={t('retryConfirm', { title: data.title })}
-        onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
-      {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}
+      {data.actions.retry && <Button variant="secondary" size="sm" icon={<Icon name="refresh" size={14} />} busy={retry.busy}
+        onClick={() => { void retry.run() }}>{t('retry')}</Button>}
+      {data.sessionId && <SessionButton variant="secondary" sessionId={data.sessionId} />}
+      {/* The page's actions sit together at its head: stopping cannot be undone, so it asks first, anchored to its button (TK-2). */}
+      {data.actions.stop && <ConfirmButton danger variant="secondary" icon="stop" label={t('stop')} title={t('stopConfirmTitle')}
+        message={`${t('stopConfirm', { title: data.title })}\n${t('stopHint')}`} onConfirm={() => act('stop', () => call('POST tickets/:id/stop', { id }))} />}
+      {pending && <Badge tone="info" dot>{t(pending === 'stop' ? 'ticketStopping' : 'ticketRetrying')}</Badge>}
     </PageHead>
-    {error && <LoadState error={error} loading={false} />}
+    <LoadState error={error} loading={false} have />
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
       <LabelValue label={t('ticketMandateLabel')} value={valueLabel(t, 'strength', data.mandate.strength)} />
@@ -189,10 +201,5 @@ export function TicketPage({ id }: { id: string }) {
             className="dt-mono dt-clamp">{data.mandate.scope}</span>] as [string, ReactNode]] : []]} />
       </Details>
     </div>
-    {data.actions.stop && <div className="dt-danger-zone">
-      <span className="dt-hint">{t('stopHint')}</span>
-      <ConfirmButton variant="outline" label={t('stop')} title={t('stopConfirmTitle')} message={t('stopConfirm', { title: data.title })}
-        onConfirm={() => after(call('POST tickets/:id/stop', { id }))} />
-    </div>}
   </>
 }

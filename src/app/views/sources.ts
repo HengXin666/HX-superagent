@@ -51,7 +51,7 @@ export function sourcesStatus(host: ViewHost, health: HealthMap, setup: SetupSta
   const view = snapshot(host)
   const since = dayAgo()
   const stats = store.read.triggerStats(since)
-  const filtered = (source: string) => store.read.triggers({ source, filtered: true }, 0, 5).items.filter(trigger => trigger.at >= since)
+  const filtered = (source: string) => store.read.triggers({ source, filtered: true }, 0, 50).items.filter(trigger => trigger.at >= since)
     .map(trigger => ({ id: trigger.id, at: trigger.at, actor: view.actor(trigger.actor, trigger.human), preview: preview(trigger.text, 120),
       reason: store.triggers.disposition(trigger.id)?.filtered }))
   const dropped = droppedReplies(host)

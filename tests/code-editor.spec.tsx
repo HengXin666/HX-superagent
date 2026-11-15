@@ -42,3 +42,30 @@ it('reads a tag input\'s chips and the name still being typed from its value', (
   expect(tagsOf('a b ')).toEqual({ tags: ['a', 'b'], typing: '' })
   expect(tagsOf('')).toEqual({ tags: [], typing: '' })
 })
+
+it('lets a keyboard leave an editable editor: its keys are described, and the first Escape frees Tab instead of closing the layer', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  const closed: string[] = []
+  const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') closed.push('layer') }
+  document.addEventListener('keydown', onEscape)
+  try {
+    const { container, unmount } = render(<CodeEditor label="Body" keysHint="Escape, then Tab, leaves" value="text" onChange={() => {}} />)
+    const content = container.querySelector<HTMLElement>('.cm-content')!
+    const hint = document.getElementById(content.getAttribute('aria-describedby')!)
+    expect(hint?.textContent).toBe('Escape, then Tab, leaves')
+    const escape = () => act(() => { content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true, cancelable: true })) })
+    escape()
+    expect(closed).toEqual([])
+    // A second Escape soon after is for the dialog or drawer around the editor.
+    escape()
+    expect(closed).toEqual(['layer'])
+    unmount()
+    // A read-only editor never takes Tab, so its Escape goes straight on and it describes no way out.
+    const readOnly = render(<CodeEditor label="Body" keysHint="Escape, then Tab, leaves" value="text" readOnly onChange={() => {}} />)
+    const fixed = readOnly.container.querySelector<HTMLElement>('.cm-content')!
+    expect(document.getElementById(fixed.getAttribute('aria-describedby')!)?.textContent).toBe('')
+    act(() => { fixed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true, cancelable: true })) })
+    expect(closed).toEqual(['layer', 'layer'])
+    readOnly.unmount()
+  } finally { document.removeEventListener('keydown', onEscape) }
+})

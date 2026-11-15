@@ -1,7 +1,7 @@
 /** Context-aware shared UI widgets: page/section headers, timestamps, Markdown rendering, and confirmation actions. */
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useRef, useState, type ReactNode } from 'react'
 import type { SetupProblem } from '../setup.ts'
-import { Button, Icon, InfoTip, Modal, StateDot, type DotState, type IconName } from './controls.tsx'
+import { Badge, EmptyState, KeyValue, LoadingBlock, Popover, Skeleton, Button, Icon, InfoTip, StateDot, type DotState, type IconName } from './ui/index.ts'
 import { inlines, linkify, markdownBlocks, type Inline } from './markdown.ts'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { settingsRoute, type SettingsGroup } from './route.ts'
@@ -37,9 +37,13 @@ export function Hint({ children }: { children: ReactNode }) { return <p classNam
 export function LabelValue({ label, value }: { label: string; value: ReactNode }) {
   return <span className="dt-lv"><span className="dt-lv-label">{label}</span> <span className="dt-lv-value">{value}</span></span>
 }
+/** Label–value pairs: the component library's KeyValue; empty values read as an em dash. */
 export function KeyValues({ rows }: { rows: [string, ReactNode][] }) {
-  return <dl className="dt-kv">{rows.map(([key, value], index) => <div key={index}
-    style={{ display: 'contents' }}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
+  return <KeyValue dense items={rows.map(([label, value], index) => ({ key: `${index}`, label, value }))} />
+}
+/** An empty list: the component library's EmptyState, saying why it is empty and, when there is one, the next step. */
+export function Empty({ children, action, icon = 'inbox' }: { children: ReactNode; action?: ReactNode; icon?: IconName }) {
+  return <EmptyState compact icon={icon} title={children} action={action} />
 }
 
 function Inlines({ parts }: { parts: Inline[] }) {
@@ -72,50 +76,89 @@ export function ClampText({ text }: { text: string }) {
   </>
 }
 
-export function ConfirmButton({ label, title, message, onConfirm, variant = 'ghost', icon }: {
-  label: string; title: string; message: string; onConfirm: () => Promise<unknown>; variant?: 'ghost' | 'outline'; icon?: IconName
+/**
+ * A button whose action asks first, in a small confirm anchored to it (the audit's rule: only an action that cannot be undone asks).
+ * `danger` marks it: the confirm reads as dangerous. The confirm stays open while the action runs and shows a failure in place;
+ * Escape or a press outside closes it and returns focus to the button. `iconOnly` draws the button as an icon with `label` as its name.
+ */
+export function ConfirmButton({ label, title, message, onConfirm, variant = 'ghost', icon, danger, iconOnly }: {
+  label: string; title: string; message: string; onConfirm: () => Promise<unknown>; variant?: 'ghost' | 'secondary'; icon?: IconName
+  danger?: boolean; iconOnly?: boolean
 }) {
   const { t } = usePanel()
   const [open, setOpen] = useState(false)
-  const confirm = useAction(onConfirm)
-  return <>
-    <Button variant={variant} size="sm" icon={icon && <Icon name={icon} size={14} />} onClick={() => setOpen(true)}>{label}</Button>
-    <Modal open={open} onClose={() => setOpen(false)} title={title} closeLabel={t('close')} description={message}
-      footer={<>
-        <Button variant="ghost" onClick={() => setOpen(false)}>{t('cancel')}</Button>
-        <Button variant="primary" disabled={confirm.busy}
-          onClick={() => { void confirm.run().then(done => { if (done) setOpen(false) }) }}>{t('confirm')}</Button>
-      </>} />
-  </>
+  const [busy, setBusy] = useState(false)
+  // A second press while the first runs does nothing, so a double click sends the action once.
+  const running = useRef(false)
+  const [failure, setFailure] = useState<string>()
+  const change = (next: boolean) => { if (!busy) { setOpen(next); setFailure(undefined) } }
+  return <Popover open={open} onOpenChange={change} label={title} className="dt-confirm" placement="bottom-end"
+    trigger={props => <Button {...props} variant={variant} size="sm" icon={icon && <Icon name={icon} size={14} />}
+      aria-label={iconOnly ? label : undefined} title={iconOnly ? label : undefined}>{iconOnly ? undefined : label}</Button>}>
+    {close => <div className="dt-confirm-body">
+      <p className="dt-confirm-title">{title}</p>
+      <p className="dt-confirm-message">{message}</p>
+      {failure && <p className="dt-error" role="alert">{failure}</p>}
+      <div className="dt-confirm-actions">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={close} autoFocus={danger}>{t('cancel')}</Button>
+        <Button variant={danger ? 'danger' : 'primary'} size="sm" disabled={busy} autoFocus={!danger} onClick={() => {
+          if (running.current) return
+          running.current = true; setBusy(true)
+          onConfirm().then(() => { running.current = false; setBusy(false); setOpen(false) },
+            error => { running.current = false; setBusy(false); setFailure(errorText(error)) })
+        }}>{t('confirm')}</Button>
+      </div>
+    </div>}
+  </Popover>
 }
 export function SessionButton({ sessionId, label,
-  variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
+  variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'secondary' }) {
   const { t, openSession, notify } = usePanel()
   return <Button variant={variant} size="sm" icon={<Icon name="session" size={14} />}
-    onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t('openSession')}</Button>
+    onClick={() => { openSession(sessionId).catch(error => notify(errorText(error), 'danger')) }}>{label ?? t('openSession')}</Button>
 }
 export function ExternalLink({ href, children, icon = 'external' }: { href: string; children: ReactNode; icon?: IconName }) {
   return <a className="dt-inline-link dt-icon-link" href={href} {...external}><Icon name={icon} size={13} />{children}</a>
 }
 export function ActionLink({ href, children, icon = 'external' }: { href: string; children: ReactNode; icon?: IconName }) {
-  return <a className="dt-btn dt-btn-outline dt-btn-sm" href={href} {...external}><span className="dt-btn-icon"><Icon name={icon}
-    size={14} /></span>{children}</a>
+  return <a className="hx-btn" data-variant="secondary" data-size="sm" href={href} {...external}><Icon name={icon}
+    size={14} /><span className="hx-btn-label">{children}</span></a>
 }
 export function StageMark({ state, icon, label }: { state: DotState; icon: IconName; label: string }) {
   return <span className="dt-stage" data-state={state}>{state === 'ongoing' ? <StateDot state="ongoing" /> : <Icon name={icon}
     size={14} />}{label}</span>
 }
-export function LoadState({ error, loading }: { error?: Error | undefined; loading: boolean }) {
+/** The shape a region's first load takes, so the page does not jump when its content arrives. */
+export type LoadShape = 'rows' | 'cards' | 'form'
+function ShapedSkeleton({ shape, label }: { shape: LoadShape; label: string }) {
+  if (shape === 'rows') return <LoadingBlock label={label} />
+  return <div className="dt-skeleton-shape" data-shape={shape} role="status" aria-live="polite"><span className="hx-sr">{label}</span>
+    {shape === 'cards' ? [0, 1, 2].map(index => <Skeleton key={index} height={88} radius="lg" />)
+      : [0, 1, 2, 3].map(index => <div key={index} className="dt-skeleton-field"><Skeleton width="30%" height={12} /><Skeleton height={32}
+        radius="md" /></div>)}
+  </div>
+}
+/**
+ * A region's load state. On its first load: a skeleton of its shape, or the error with a retry when it failed with nothing to show.
+ * Once it has data (`have`), a failed refresh does not push the page: a small badge in a slot of no height says the data may be
+ * out of date, and hovering it gives the error.
+ */
+export function LoadState({ error, loading, onRetry, have, shape = 'rows' }: { error?: Error | undefined; loading: boolean
+  onRetry?: () => void; have?: boolean; shape?: LoadShape }) {
   const { t } = usePanel()
-  if (error) return <p className="dt-error" role="alert">{error.message}</p>
-  return loading ? <div className="dt-loading" role="status" aria-busy="true">
-    <span className="dt-skeleton dt-skeleton-line" /><span className="dt-skeleton dt-skeleton-line" /><span className="dt-skeleton dt-skeleton-line" />
-    <Hint>{t('loading')}</Hint>
-  </div> : null
+  if (have) return error ? <div className="dt-stale-slot"><span className="dt-stale" role="status" title={error.message}><Badge tone="warning"
+    dot title={error.message}>{t('dataStale')}</Badge></span></div> : null
+  if (error) return <EmptyState icon="alert" compact title={<span className="dt-error" role="alert">{error.message}</span>}
+    action={onRetry && <Button variant="secondary" size="sm" icon={<Icon name="refresh" size={14} />} onClick={onRetry}>{t('retry')}</Button>} />
+  return loading ? <ShapedSkeleton shape={shape} label={t('loading')} /> : null
+}
+/** A list whose rows may be the previous filter's while the new one loads: dimmed, busy and not clickable until it arrives. */
+export function ListRegion({ stale, children }: { stale?: boolean; children: ReactNode }) {
+  return <div className="dt-list-region" aria-busy={stale || undefined} data-stale={stale || undefined}>{children}</div>
 }
 export function LoadMore({ onMore }: { onMore: () => void }) {
   const { t } = usePanel()
-  return <Button variant="outline" size="sm" icon={<Icon name="chevron-down" size={14} />} onClick={onMore}>{t('loadMore')}</Button>
+  return <Button variant="secondary" size="sm" icon={<Icon name="chevron-down" size={14} />} onClick={onMore}>{t('loadMore')}</Button>
 }
 
 export function StatusHead({ hint, settings }: { hint: string; settings?: SettingsGroup }) {
@@ -141,10 +184,10 @@ export function CheckSetupButton() {
   const action = useAction(check)
   if (running > 0) {
     const message = t('setupCheckInterrupts', { count: running })
-    return <ConfirmButton variant="outline" icon="refresh" label={t('setupCheck')} title={t('setupCheck')} message={message}
+    return <ConfirmButton variant="secondary" icon="refresh" label={t('setupCheck')} title={t('setupCheck')} message={message}
       onConfirm={check} />
   }
   const icon = <Icon name="refresh" size={14} />
-  return <Button variant="outline" size="sm" icon={icon} disabled={action.busy}
+  return <Button variant="secondary" size="sm" icon={icon} disabled={action.busy}
     onClick={() => { void action.run() }}>{t('setupCheck')}</Button>
 }

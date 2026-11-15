@@ -25,7 +25,7 @@ it('saves this machine\'s settings in the Deployment settings through DSH\'s con
   expect(document.querySelector('.dt-savebar')?.textContent).toBe(`${zh.draftKept}${zh.discard}${zh.save}`)
   await click(zh.save)
   expect(mutations).toEqual([{ revision: 1, ops: [{ op: 'set', path: ['admissionContextTimeoutMs'], value: 20000 }] }])
-  expect(document.querySelector('.dt-toast')?.textContent).toBe(zh.saved)
+  expect(document.querySelector('.hx-toast-title')?.textContent).toBe(zh.saved)
   expect(text()).not.toContain(zh.savedRestarting)
   expect(field<HTMLInputElement>(zh.deploymentContextTimeout).value).toBe('20000')
 })

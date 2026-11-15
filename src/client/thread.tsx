@@ -1,12 +1,12 @@
 /** Thread detail page: Trigger timeline with gap-free pagination, Decisions, subscribed Tickets, and correlated Threads. */
 import { useEffect, useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type ThreadPageView, type TriggerRow } from './api.ts'
-import { Button, DisclosureRow, Icon, Tag } from './controls.tsx'
 import { decisionMark } from './marks.ts'
 import { useAction, usePanel } from './provider.tsx'
 import { DecisionLine, Earlier, TicketLine, automatedRuns } from './rows.tsx'
 import { actorName, errorText, readableMarkers, reasonLabel, valueLabel, when, type T } from './text.ts'
 import { ActionLink, ClampText, ConfirmButton, Hint, LoadState, PageHead, Section, When } from './widgets.tsx'
+import { Button, DisclosureRow, Icon, Tag } from './ui/index.ts'
 
 /** Disposition tags for a Trigger; omits `ignore` (the common case) and suppresses fanout tags when every target Ticket is already listed in `subscribed`. */
 function triggerTags(t: T, trigger: TriggerRow, subscribed?: Set<string>): ReactNode {
@@ -82,7 +82,7 @@ function useThreadTimeline(key: string, target: string | undefined) {
     let active = true
     call('GET threads/:key', { key, query: { limit: PAGE, around: target } }).then(page => {
       if (active) setOlder({ triggers: page.timeline, cursor: page.earlier })
-    }, (failure: unknown) => { if (active) notify(errorText(failure)) })
+    }, (failure: unknown) => { if (active) notify(errorText(failure), 'danger') })
     return () => { active = false }
   }, [missing, call, key, target, notify])
   const gap = !!newest && gapBetween(newest, older)
@@ -97,7 +97,7 @@ function useThreadTimeline(key: string, target: string | undefined) {
       }
       if (active) setOlder({ triggers: byTime([...older.triggers, ...run]), cursor: overlaps(run, older.triggers) ? older.cursor : cursor })
     }
-    fill().catch((failure: unknown) => { if (active) notify(errorText(failure)) })
+    fill().catch((failure: unknown) => { if (active) notify(errorText(failure), 'danger') })
     return () => { active = false }
   }, [gap, newest, older, call, key, notify])
   const earlier = useAction(async (shown: ThreadPageView) => {
@@ -110,10 +110,18 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
   const { t, call, navigate, notify } = usePanel()
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const { data, error, reload, earlier } = useThreadTimeline(id, target)
-  const requeue = useAction(async (trigger: string) => {
-    const result = await call('POST triggers/:id/requeue', { id: trigger })
-    if (!result.queued) notify(t('requeueAlready'))
-  }, { reload })
+  // Each Trigger's requeue is its own: one in flight leaves the others' buttons alone (THR-1).
+  const [requeuing, setRequeuing] = useState<ReadonlySet<string>>(new Set())
+  const requeue = async (trigger: string) => {
+    if (requeuing.has(trigger)) return
+    setRequeuing(current => new Set(current).add(trigger))
+    try {
+      const result = await call('POST triggers/:id/requeue', { id: trigger })
+      if (!result.queued) notify(t('requeueAlready'))
+      await reload()
+    } catch (failure) { notify(errorText(failure), 'danger') }
+    finally { setRequeuing(current => { const next = new Set(current); next.delete(trigger); return next }) }
+  }
   if (!data) return <><PageHead
     title={t('term.thread')} />{error instanceof ApiError && error.missing ? <Hint>{t('threadNotFound')}</Hint> : <LoadState
       error={error} loading />}</>
@@ -127,8 +135,12 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
     await reload()
   }
   return <>
-    <PageHead title={readableMarkers(t, data.title)}>{data.url && <ActionLink href={data.url}>{t('openOriginal')}</ActionLink>}</PageHead>
-    {error && <LoadState error={error} loading={false} />}
+    <PageHead title={readableMarkers(t, data.title)}>{data.url && <ActionLink href={data.url}>{t('openOriginal')}</ActionLink>}
+      {/* Unsubscribing is at hand at the head, however long the timeline below; it cannot be undone, so it asks first (THR-2). */}
+      {data.tickets.length > 0 && <ConfirmButton danger variant="secondary" icon="unsubscribe" label={t('unsubscribe')} title={t('unsubscribeTitle')}
+        message={`${t('unsubscribeConfirm', { title: data.title })}\n${t('unsubscribeHint')}`} onConfirm={unsubscribe} />}
+    </PageHead>
+    <LoadState error={error} loading={false} have />
     <div className="dt-row-meta dt-status-line">
       <span>{valueLabel(t, 'source', data.source)}</span><span>{t('threadLatest',
         { time: when(data.lastAt, t('lang')) })}</span><span>{t('threadCreated', { time: when(data.createdAt, t('lang')) })}</span>
@@ -158,20 +170,14 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
       {data.timeline.length ? <ol className="dt-timeline">{automatedRuns(data.timeline.slice().reverse(), sender).map(({ item,
         earlier: folded }) =>
         <TriggerItem key={item.id} trigger={item} earlier={folded} target={target} subscribed={subscribed}
-          requeue={item.actions.requeue ? { busy: requeue.busy, run: () => { void requeue.run(item.id) } } : undefined} />)}</ol>
+          requeue={item.actions.requeue ? { busy: requeuing.has(item.id), run: () => { void requeue(item.id) } } : undefined} />)}</ol>
             : <Hint>{t('noTriggers')}</Hint>}
       {data.earlier && <div>
-        <Button variant="outline" size="sm" icon={<Icon name="chevron-down"
+        <Button variant="secondary" size="sm" icon={<Icon name="chevron-down"
           size={14} />} disabled={earlier.busy} onClick={() => { void earlier.run(data) }}>
           {t('loadEarlier')}
         </Button>
       </div>}
     </Section>
-    {data.tickets.length > 0 && <div className="dt-danger-zone">
-      <span className="dt-hint">{t('unsubscribeHint')}</span>
-      <ConfirmButton variant="outline" icon="unsubscribe" label={t('unsubscribe')} title={t('unsubscribeTitle')}
-        message={t('unsubscribeConfirm', { title: data.title })}
-        onConfirm={unsubscribe} />
-    </div>}
   </>
 }

@@ -198,7 +198,12 @@ export class Store implements Repositories {
     this.db.prepare('INSERT INTO kv VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, JSON.stringify(value))
   }
   /** Deletes the KV record at `name`. */
-  delete(name: string): void { this.db.prepare('DELETE FROM kv WHERE key=?').run(name) }
+  delete(name: string): void {
+    // A removed setting or prompt changes what the panel shows as much as a written one, so it reaches the live feed too.
+    if (name.startsWith('prompt-')) this.touch('prompts')
+    else if (name.startsWith('settings-')) this.touch('settings')
+    this.db.prepare('DELETE FROM kv WHERE key=?').run(name)
+  }
   /** Returns all KV keys belonging to `family` or starting with `prefix`. */
   keys<V>(family: Family<V, never>): Key<V>[]
   keys(prefix: string): string[]

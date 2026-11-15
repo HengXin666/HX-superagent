@@ -3,15 +3,16 @@
  * marks, `$` completion of the environment's variables, search, undo history and bracket matching. Where the browser lacks what
  * CodeMirror measures layout with (`ResizeObserver`), it falls back to a plain text area with the same label and value.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, type Ref } from 'react'
+import { forwardRef, useEffect, useId, useImperativeHandle, useRef, type KeyboardEvent, type Ref } from 'react'
 import { autocompletion, type CompletionContext } from '@codemirror/autocomplete'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
-import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { HighlightStyle, bracketMatching, defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
 import { Compartment, EditorState } from '@codemirror/state'
 import { Decoration, EditorView, MatchDecorator, ViewPlugin, drawSelection, highlightActiveLine, highlightActiveLineGutter, keymap,
   lineNumbers, placeholder as hint, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import { useFieldControl } from './ui/index.ts'
 
 export interface CodeEditorHandle {
   /** Replace the selection with `text` and put the caret after it. */
@@ -24,9 +25,16 @@ export interface CodeEditorProps {
   /** Variables `$` completes, with what each holds. */
   variables?: readonly { key: string; description: string }[]
   readOnly?: boolean
-  /** The id a field's label points at. */
+  /** The id a field's label points at; inside a library Field the field's own id is used. */
   id?: string
+  /**
+   * How a keyboard leaves the editor, read to screen readers with its label. Tab indents in an editable CodeMirror, so Escape then Tab
+   * (or Ctrl+M, Shift+Alt+M on macOS) is the way out (docs/010-keyboard.md).
+   */
+  keysHint?: string
 }
+/** How long after Escape a second Escape goes on to the layer around the editor (CodeMirror keeps Tab free for 2 s after Escape). */
+const ESCAPE_WINDOW = 2000
 /** Whether this browser can lay CodeMirror out; jsdom and very old browsers get the text area. */
 const capable = () => typeof window !== 'undefined' && typeof ResizeObserver !== 'undefined' && typeof document.createRange === 'function'
 
@@ -38,18 +46,38 @@ const markPlugin = ViewPlugin.fromClass(class {
   update(update: ViewUpdate) { this.decorations = marks.updateDeco(update, this.decorations) }
 }, { decorations: plugin => plugin.decorations })
 const theme = EditorView.theme({
-  '&': { fontSize: '12.5px', backgroundColor: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+  '&': { fontSize: 'var(--hx-ui-fs-code)', backgroundColor: 'var(--hx-c-bg-layer-1)', color: 'var(--hx-c-label-primary)' },
   '&.cm-focused': { outline: 'none' },
-  '.cm-content': { fontFamily: 'var(--ds-font-family-code, Menlo, monospace)', padding: '8px 0', caretColor: 'var(--dsw-alias-brand-primary)' },
-  '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--dsw-alias-label-caption)', border: 'none', paddingLeft: '4px' },
-  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--dsw-alias-brand-primary) 5%, transparent)' },
-  '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--dsw-alias-label-secondary)' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'color-mix(in srgb, var(--dsw-alias-brand-primary) 22%, transparent) !important' },
-  '.cm-placeholder': { color: 'var(--dsw-alias-label-dimmed)' },
-  '.cm-tooltip': { border: '0.5px solid var(--dsw-alias-border-l3)', borderRadius: '10px', backgroundColor: 'var(--dsw-alias-bg-layer-2)', overflow: 'hidden', boxShadow: 'var(--dsw-elevation-prominent)' },
-  '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--dsw-alias-brand-primary)', color: 'var(--dsw-alias-label-primary-foreground)' },
-  '.cm-panels': { backgroundColor: 'var(--dsw-alias-bg-layer-2)', color: 'inherit' },
+  '.cm-content': { fontFamily: 'var(--hx-ui-font-mono)', padding: 'var(--hx-ui-space-2) 0', caretColor: 'var(--hx-c-brand-primary)' },
+  '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--hx-c-label-caption)', border: 'none', paddingLeft: 'var(--hx-ui-space-1)' },
+  '.cm-activeLine': { backgroundColor: 'var(--hx-c-brand-faint)' },
+  '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--hx-c-label-secondary)' },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--hx-c-brand-selection) !important' },
+  '.cm-placeholder': { color: 'var(--hx-c-label-dimmed)' },
+  '.cm-tooltip': { border: 'var(--hx-ui-line)', borderRadius: 'var(--hx-ui-radius-lg)', backgroundColor: 'var(--hx-c-bg-layer-2)', overflow: 'hidden', boxShadow: 'var(--hx-ui-shadow-pop)' },
+  '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--hx-c-brand-fill)', color: 'var(--hx-c-label-on-brand)' },
+  '.cm-panels': { backgroundColor: 'var(--hx-c-bg-layer-2)', color: 'inherit' },
 })
+/**
+ * The semantic color a CodeMirror default highlight color stands for. CodeMirror's `defaultHighlightStyle` writes dark-on-white colors
+ * (its meta gray is 1.9:1 on the dark card), so each of its colors is mapped by hue to the panel token of that role, which has a light and
+ * a dark value that both pass AA on the editor's surface. Gray (meta marks, comments in some grammars) reads as caption text.
+ */
+export function highlightToken(hex: string): string {
+  const full = hex.replace('#', '').length === 3 ? [...hex.replace('#', '')].map(c => c + c).join('') : hex.replace('#', '')
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16) / 255) as [number, number, number]
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), chroma = max - min
+  if (chroma < 0.15) return 'var(--hx-c-label-caption)'
+  const hue = (max === r ? ((g - b) / chroma + 6) % 6 : max === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4) * 60
+  if (hue < 12 || hue >= 330) return 'var(--hx-c-state-error-primary)'
+  if (hue < 60) return 'var(--hx-c-state-warn-primary)'
+  if (hue < 165) return 'var(--hx-c-state-success-primary)'
+  if (hue < 215) return 'var(--hx-c-state-business-primary)'
+  if (hue < 265) return 'var(--hx-c-link)'
+  return 'var(--hx-c-brand-primary)'
+}
+/** CodeMirror's default highlighting, same tags and weights, colored through the panel's tokens. */
+const highlight = HighlightStyle.define(defaultHighlightStyle.specs.map(spec => typeof spec.color === 'string' ? { ...spec, color: highlightToken(spec.color) } : spec))
 function variableCompletion(variables: readonly { key: string; description: string }[]) {
   return (context: CompletionContext) => {
     const word = context.matchBefore(/\$\{?[A-Z0-9_]*/)
@@ -60,14 +88,24 @@ function variableCompletion(variables: readonly { key: string; description: stri
 }
 
 export const CodeEditor = forwardRef(function CodeEditor(props: CodeEditorProps, ref: Ref<CodeEditorHandle>) {
-  const { value, onChange, label, language = 'markdown', placeholder, className, minLines = 6, maxLength, variables, readOnly, id } = props
+  const { value, onChange, label, language = 'markdown', placeholder, className, minLines = 6, maxLength, variables, keysHint } = props
+  const hintId = useId()
+  const escaped = useRef(0)
+  const fancy = capable()
+  // In a field, the text area is named by the label element; the editor's content is not labelable, so it takes aria-labelledby.
+  const control = useFieldControl({ id: props.id, label, readOnly: props.readOnly }, { labelable: !fancy })
+  const { id, readOnly } = control
+  // Described by the field's note or error, then (in the editor) by how a keyboard leaves it.
+  const describedBy = [control.describedBy, fancy && keysHint ? hintId : undefined].filter(Boolean).join(' ') || undefined
+  const named = { ...control.ariaLabel !== undefined ? { 'aria-label': control.ariaLabel } : {},
+    ...control.labelledBy ? { 'aria-labelledby': control.labelledBy } : {}, ...describedBy ? { 'aria-describedby': describedBy } : {} }
   const host = useRef<HTMLDivElement>(null)
   const area = useRef<HTMLTextAreaElement>(null)
   const view = useRef<EditorView>(undefined)
   const changed = useRef(onChange)
   changed.current = onChange
   const editable = useRef(new Compartment())
-  const fancy = capable()
+  const attributes = useRef(new Compartment())
   useImperativeHandle(ref, () => ({
     insert(text) {
       const editor = view.current
@@ -88,12 +126,12 @@ export const CodeEditor = forwardRef(function CodeEditor(props: CodeEditorProps,
     const editor = new EditorView({ parent: host.current, state: EditorState.create({ doc: value, extensions: [
       lineNumbers(), highlightActiveLineGutter(), highlightActiveLine(), drawSelection(), history(), bracketMatching(), highlightSelectionMatches(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]), EditorView.lineWrapping, markPlugin, theme,
-      ...language === 'markdown' ? [markdown(), syntaxHighlighting(defaultHighlightStyle, { fallback: true })] : [],
+      ...language === 'markdown' ? [markdown(), syntaxHighlighting(highlight, { fallback: true })] : [],
       ...variables?.length ? [autocompletion({ override: [variableCompletion(variables)], icons: false })] : [],
       ...placeholder ? [hint(placeholder)] : [],
       ...maxLength ? [EditorState.changeFilter.of(transaction => transaction.newDoc.length <= maxLength)] : [],
       editable.current.of(EditorView.editable.of(!readOnly)),
-      EditorView.contentAttributes.of({ 'aria-label': label, 'aria-multiline': 'true' }),
+      attributes.current.of(EditorView.contentAttributes.of({ ...named, 'aria-multiline': 'true' })),
       EditorView.updateListener.of(update => {
         if (update.docChanged) changed.current(update.state.doc.toString())
         if (update.selectionSet || update.docChanged) {
@@ -112,8 +150,26 @@ export const CodeEditor = forwardRef(function CodeEditor(props: CodeEditorProps,
     if (editor && editor.state.doc.toString() !== value) editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: value } })
   }, [value])
   useEffect(() => { view.current?.dispatch({ effects: editable.current.reconfigure(EditorView.editable.of(!readOnly)) }) }, [readOnly])
-  if (!fancy) return <textarea ref={area} id={id} className={`dt-textarea dt-mono ${className ?? ''}`} spellCheck={false} aria-label={label}
+  // The label, the note and the error can come and go after the editor is made: keep its content's name and description current.
+  const naming = JSON.stringify(named)
+  useEffect(() => {
+    view.current?.dispatch({ effects: attributes.current.reconfigure(EditorView.contentAttributes.of({ ...named, 'aria-multiline': 'true' })) })
+  }, [naming]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!fancy) return <textarea ref={area} id={id} className={`hx-textarea dt-mono ${className ?? ''}`} spellCheck={false} {...named}
     rows={minLines} maxLength={maxLength} placeholder={placeholder} readOnly={readOnly} value={value}
     onChange={event => onChange(event.target.value)} />
-  return <div ref={host} id={id} className={`dt-code-editor ${className ?? ''}`} style={{ ['--dt-editor-lines' as string]: minLines }} />
+  /**
+   * Escape in an editable editor frees Tab to leave it (CodeMirror's tab focus mode), so it stops here instead of closing the dialog or
+   * drawer around it; a second Escape soon after goes on and closes that layer. A read-only editor never takes Tab, so Escape passes.
+   */
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Escape' || readOnly || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    const now = Date.now()
+    if (now - escaped.current > ESCAPE_WINDOW) { escaped.current = now; event.stopPropagation() }
+    else escaped.current = 0
+  }
+  return <>
+    <div ref={host} id={id} className={`dt-code-editor ${className ?? ''}`} style={{ ['--dt-editor-lines' as string]: minLines }} onKeyDown={onKeyDown} />
+    {keysHint && <span id={hintId} className="hx-sr">{readOnly ? '' : keysHint}</span>}
+  </>
 })

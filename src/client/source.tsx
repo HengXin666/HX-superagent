@@ -2,15 +2,16 @@
 import { Fragment, useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
-import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { RepositoryTable } from './repositories.tsx'
+import { DroppedTable, FilteredTable } from './filtered.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
-import { setupPage, settingsRoute, type Route } from './route.ts'
+import { setupPage, settingsRoute } from './route.ts'
 import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
-import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
-import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
+import { healthText, localized, valueLabel, when } from './text.ts'
+import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead } from './widgets.tsx'
+import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './ui/index.ts'
 
 function SourceCard({ source }: { source: SourceView }) {
   const { t, call } = usePanel()
@@ -32,7 +33,7 @@ function SourceCard({ source }: { source: SourceView }) {
     refreshLabels={refreshLabels} fact={spec.type === 'fact' || !changed(spec.key) ? source.facts[spec.key] : undefined}
     onChange={next => draft.edit({ ...value, config: { ...value.config, [spec.key]: next } })} />
   const advanced = source.fields.filter(spec => spec.advanced)
-  return <form id={`dt-source-${source.id}`} className="dt-card" onSubmit={event => { void draft.submit(event) }}>
+  return <form id={`dt-source-${source.id}`} data-pipeline-part={`source:${source.id}`} className="dt-card" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <div className="dt-card-head">
         <div className="dt-row-main">
@@ -43,7 +44,7 @@ function SourceCard({ source }: { source: SourceView }) {
         </div>
         {source.installed && <Switch checked={value.enabled} onChange={enabled => draft.edit({ ...value, enabled })}
           label={t('sourceEnable', { name: localized(t, source.title) })} />}
-        {source.id === 'github' && <Button variant="outline" size="sm" icon={<Icon name="plus" />}
+        {source.id === 'github' && <Button variant="secondary" size="sm" icon={<Icon name="plus" />}
           onClick={() => document.getElementById('dt-source-github-repositories')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })}
           aria-label={t('addRepo')}>{t('addRepo')}</Button>}
       </div>
@@ -73,28 +74,15 @@ export function SourceSettings({ focus }: { focus?: string }) {
   </div>
 }
 
-function DroppedReplies({ items }: { items: DroppedReply[] }) {
-  const { t, navigate } = usePanel()
+function DroppedReplies({ items, source }: { items: DroppedReply[]; source: string }) {
+  const { t } = usePanel()
   const [open, setOpen] = useState(false)
-  // Link to the message's Ticket, or fall back to its Thread for messages queued before receipts recorded `ticketId`.
-  const target = (item: DroppedReply): { route: Route; name: string } | undefined => item.ticket
-    ? { route: { page: 'execution', id: item.ticket.id }, name: item.ticket.title }
-    : item.thread ? { route: { page: 'trigger', id: item.thread }, name: t('term.thread') } : undefined
   return <DisclosureRow icon={<Icon name="dismiss" />} title={<>{t('sourceDroppedTitle')} <span
     className="dt-count">{items.length}</span></>} open={open}
     onToggle={() => setOpen(!open)}>
     <div className="dt-disclosure-body">
       <Hint>{t('sourceDroppedHint')}</Hint>
-      <ul className="dt-list">{items.map(item => {
-        const link = target(item)
-        return <li key={item.id} className="dt-row"><Dot state="idle" /><div className="dt-row-main">
-          <div className="dt-row-title dt-line">{readableMarkers(t, item.preview) || t('empty')}</div>
-          <div className="dt-row-meta">
-            <Tag tone="neutral">{reasonLabel(t, item.dropped.reason)}</Tag><When at={item.dropped.at} />
-            {link && <button type="button" className="dt-textlink" onClick={() => navigate(link.route)}>{link.name}</button>}
-          </div>
-        </div></li>
-      })}</ul>
+      <DroppedTable rows={items.map(item => ({ ...item, source }))} />
     </div>
   </DisclosureRow>
 }
@@ -131,19 +119,14 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
       {source.filtered.length > 0 && <DisclosureRow icon={<Icon name="filter" />} title={t('sourceFilteredTitle')} open={filteredOpen}
         onToggle={() => setFilteredOpen(!filteredOpen)}>
         <div className="dt-disclosure-body">
-          <ul className="dt-list">{source.filtered.map(item => <li key={item.id} className="dt-row"><Dot state="idle" /><div
-            className="dt-row-main">
-            <div className="dt-row-title">{actorName(t, item.actor)}{t('labelSeparator')}{readableMarkers(t, item.preview)
-              || t('empty')}</div>
-            <div className="dt-row-meta"><Tag tone="neutral">{reasonLabel(t, item.reason)}</Tag><When at={item.at} /></div>
-          </div></li>)}</ul>
+          <FilteredTable rows={source.filtered.map(item => ({ ...item, source: source.id }))} />
         </div>
       </DisclosureRow>}
       {source.id === 'github' && <p className="dt-row-meta">
         <button type="button" className="dt-textlink"
           onClick={() => navigate(settingsRoute('source', { source: 'github' }))}>{t('sourceAddRepository')}</button>
       </p>}
-      {dropped.length > 0 && <DroppedReplies items={dropped} />}
+      {dropped.length > 0 && <DroppedReplies items={dropped} source={source.id} />}
     </div>
   </li>
 }

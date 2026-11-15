@@ -5,10 +5,10 @@
  * after the last event it read, or tells every view to reload when the host no longer holds that event.
  */
 import { createContext, useContext, useEffect, useRef, useSyncExternalStore } from 'react'
-import type { Activity, LiveEvent, LiveTopic } from '../app/live.ts'
+import type { Activity, LiveEvent, LiveTopic, Stage } from '../app/live.ts'
 
 export type LiveStatus = 'live' | 'connecting' | 'polling'
-export type { Activity, LiveEvent, LiveTopic }
+export type { Activity, LiveEvent, LiveTopic, Stage }
 type Listener = (event: LiveEvent | { topic: 'reset'; seq: number }) => void
 
 /** The panel's connection to the live feed, which reconnects on its own and tells subscribed views what changed. */
@@ -87,6 +87,24 @@ export class LiveClient {
     }
     if (this.abort === abort) this.retry()
   }
+}
+
+/**
+ * One connection per feed address for the whole page: every panel provider on it (the panel, the Plugin Manager page's own)
+ * shares it rather than opening another stream. `release` stops it once the last holder lets go.
+ */
+const shared = new Map<string, { client: LiveClient; holders: number }>()
+export function holdLive(url = '/orchestrator/api/events'): { client: LiveClient; release: () => void } {
+  let entry = shared.get(url)
+  if (!entry) { entry = { client: new LiveClient(url), holders: 0 }; shared.set(url, entry) }
+  const held = entry
+  if (held.holders++ === 0) held.client.start()
+  let released = false
+  return { client: held.client, release: () => {
+    if (released) return
+    released = true
+    if (--held.holders === 0) { held.client.stop(); if (shared.get(url) === held) shared.delete(url) }
+  } }
 }
 
 export const LiveContext = createContext<LiveClient | null>(null)

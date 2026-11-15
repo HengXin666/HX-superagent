@@ -2,14 +2,15 @@
  * The prompt preset bar of the Prompts settings: the presets the draft turns on, in the order they apply, which a person adds
  * several of at once, reorders by dragging or with the keyboard, and removes; and the library where the team writes its own.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { PromptConfig } from './api.ts'
-import { Button, Icon, Input, Modal, SegmentedControl, Tag } from './controls.tsx'
 import { useAction, usePanel } from './provider.tsx'
 import { errorText } from './text.ts'
-import { Hint } from './widgets.tsx'
+import { useLive } from './live.ts'
+import { ConfirmButton, Hint, Empty } from './widgets.tsx'
 import { CodeEditor } from './code-editor.tsx'
+import { MultiSelect, Tabs, Button, Field, Icon, Input, Modal, SegmentedControl, Tag } from './ui/index.ts'
 
 type Library = ApiResponse<'GET prompt-presets'>
 export type PresetRow = Library['presets'][number]
@@ -27,6 +28,8 @@ export function usePresetLibrary() {
   const reload = useCallback(async () => { try { setLibrary(await call('GET prompt-presets')); setError(undefined) }
     catch (failure) { setError(errorText(failure)) } }, [call])
   useEffect(() => { void reload() }, [reload])
+  // Another person's or tab's save of the presets reaches this library at once.
+  useLive(['prompts'], () => { void reload() })
   return { library, error, reload }
 }
 
@@ -47,53 +50,48 @@ export function PromptPresetBar({ config, library, error, reload, onChange }: {
   config: PromptConfig; library: Library | undefined; error: string | undefined; reload: () => Promise<void>
   onChange: (presets: string[]) => void
 }) {
-  const { t } = usePanel()
+  const { t, notify } = usePanel()
   const [picking, setPicking] = useState(false)
   const [managing, setManaging] = useState(false)
-  const [dragged, setDragged] = useState<number>()
   const active = config.presets ?? []
   const row = (id: string) => library?.presets.find(preset => preset.id === id)
-  const move = (from: number, to: number) => {
-    if (to < 0 || to >= active.length || from === to) return
-    const next = [...active]; const [item] = next.splice(from, 1); next.splice(to, 0, item!); onChange(next)
+  // The chain is the library's MultiSelect: a drag handle and drop line, Alt+arrows to move with the new place announced, and
+  // removal from the chip's button, which a notice can undo (PRM-4).
+  const change = (next: string[]) => {
+    const removed = active.filter(id => !next.includes(id))
+    onChange(next)
+    if (removed.length) notify(t('promptPresetRemoved', { name: removed.map(id => row(id)?.name ?? id).join(t('listSeparator')) }), 'info',
+      { label: t('undo'), onClick: () => onChange(active) })
   }
-  const keys = (index: number) => (event: KeyboardEvent) => {
-    if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowUp')) { event.preventDefault(); move(index, index - 1) }
-    if (event.altKey && (event.key === 'ArrowRight' || event.key === 'ArrowDown')) { event.preventDefault(); move(index, index + 1) }
-    if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); onChange(active.filter((_, at) => at !== index)) }
-  }
-  const drop = (index: number) => (event: DragEvent) => { event.preventDefault(); if (dragged !== undefined) move(dragged, index); setDragged(undefined) }
+  const options = (library?.presets ?? []).map(preset => ({ value: preset.id, label: preset.name }))
   return <section className="dt-preset-bar" aria-label={t('promptPresets')}>
     <div className="dt-preset-bar-head">
       <span className="dt-preset-bar-title"><Icon name="settings" size={14} />{t('promptPresets')}<span className="dt-count">{active.length || ''}</span></span>
       <span className="dt-actions">
-        <Button variant="outline" size="sm" icon={<Icon name="plus" />} disabled={!library} onClick={() => setPicking(true)}>
+        <Button variant="secondary" size="sm" icon={<Icon name="plus" />} disabled={!library} onClick={() => setPicking(true)}>
           {t('promptPresetsPick')}</Button>
         <Button variant="ghost" size="sm" icon={<Icon name="review" />} disabled={!library} onClick={() => setManaging(true)}>
           {t('promptPresetsManage')}</Button>
       </span>
     </div>
     {error && <p className="dt-error">{error}</p>}
-    {active.length ? <ol className="dt-preset-chain" aria-label={t('promptPresetsOrder')}>
-      {active.map((id, index) => {
-        const preset = row(id)
-        return <li key={id} className="dt-preset-chip" draggable data-dragging={dragged === index || undefined}
-          style={{ ['--dt-hue' as string]: presetHue(id) }} tabIndex={0} aria-label={t('promptPresetChip', { index: index + 1,
-            name: preset?.name ?? id })}
-          onKeyDown={keys(index)} onDragStart={() => setDragged(index)} onDragEnd={() => setDragged(undefined)}
-          onDragOver={event => event.preventDefault()} onDrop={drop(index)}>
-          <span className="dt-preset-step">{index + 1}</span>
-          <span className="dt-preset-chip-name">{preset?.name ?? id}</span>
-          {preset && <span className="dt-preset-chip-meta">{t(`promptPresetMode.${preset.mode}`)}</span>}
-          {!preset && <Tag tone="danger">{t('promptPresetMissing')}</Tag>}
-          <button type="button" className="dt-preset-chip-remove" aria-label={t('promptPresetRemove', { name: preset?.name ?? id })}
-            onClick={() => onChange(active.filter(item => item !== id))}><Icon name="close" size={12} /></button>
-        </li>
-      })}
-    </ol> : <Hint>{t('promptPresetsNone')}</Hint>}
+    {active.length ? <div className="dt-preset-chain" aria-label={t('promptPresetsOrder')}>
+      <MultiSelect options={options} value={active} onChange={change} label={t('promptPresetsOrder')} placeholder={t('promptPresetsAdd')}
+        labels={{ remove: name => t('promptPresetRemove', { name }), moved: (name, position, total) => t('promptPresetMoved', { name,
+          position, total }), empty: t('none') }}
+        renderChip={(option, id) => {
+          const preset = row(id)
+          return <span className="dt-preset-chip" style={{ ['--dt-hue' as string]: presetHue(id) }}>
+            <PresetSwatch preset={{ id, name: option?.label ?? id }} />
+            <span className="dt-preset-chip-name">{preset?.name ?? id}</span>
+            {preset && <span className="dt-preset-chip-meta">{t(`promptPresetMode.${preset.mode}`)}</span>}
+            {!preset && <Tag tone="danger">{t('promptPresetMissing')}</Tag>}
+          </span>
+        }} />
+    </div> : <Empty>{t('promptPresetsNone')}</Empty>}
     {active.length > 1 && <Hint>{t('promptPresetsOrderHint')}</Hint>}
     {library && <PresetPicker open={picking} library={library} active={active} onClose={() => setPicking(false)}
-      onApply={next => { onChange(next); setPicking(false) }} />}
+      onApply={next => { change(next); setPicking(false) }} />}
     {library && <PresetLibrary open={managing} library={library} config={config} reload={reload} onClose={() => setManaging(false)} />}
   </section>
 }
@@ -109,14 +107,14 @@ function PresetPicker({ open, library, active, onClose, onApply }: {
   const shown = library.presets.filter(preset => !query.trim() || `${preset.name} ${preset.id} ${preset.description}`.toLowerCase()
     .includes(query.trim().toLowerCase()))
   const toggle = (id: string) => setChosen(chosen.includes(id) ? chosen.filter(item => item !== id) : [...chosen, id])
-  return <Modal className="dt-preset-modal" open={open} onClose={onClose} title={t('promptPresetsPick')} closeLabel={t('close')}
+  return <Modal size="lg" className="dt-preset-modal" open={open} onClose={onClose} title={t('promptPresetsPick')} closeLabel={t('close')}
     description={t('promptPresetsPickHint')} footer={<>
       <span className="dt-hint dt-preset-footer-count">{t('promptPresetsChosen', { count: chosen.length })}</span>
       <Button variant="ghost" onClick={onClose}>{t('cancel')}</Button>
       <Button variant="primary" onClick={() => onApply(chosen)}>{t('promptPresetsApply')}</Button>
     </>}>
     <div className="dt-preset-pick">
-      <Input icon={<Icon name="search" />} type="search" value={query} placeholder={t('promptPresetsSearch')}
+      <Input start={<Icon name="search" />} type="search" value={query} placeholder={t('promptPresetsSearch')}
         aria-label={t('promptPresetsSearch')} onChange={event => setQuery(event.target.value)} />
       <ul className="dt-preset-options">{shown.map(preset => {
         const order = chosen.indexOf(preset.id)
@@ -147,6 +145,7 @@ function PresetLibrary({ open, library, config, reload, onClose }: {
   const { t, call, notify } = usePanel()
   const own = useMemo(() => library.presets.filter(preset => !preset.builtin), [library])
   const [editing, setEditing] = useState<Editing>()
+  const [pending, setPending] = useState<{ merged: PresetRow[]; added: number; replaced: number }>()
   const file = useRef<HTMLInputElement>(null)
   const save = useAction(async (presets: PresetRow[]) => {
     await call('PUT prompt-presets', { body: { presets: presets.map(stored), revision: library.revision } })
@@ -176,8 +175,10 @@ function PresetLibrary({ open, library, config, reload, onClose }: {
       const presets = rows.map(row => 'patch' in row ? row : { ...blank(), id: chosen.name.replace(/\..*$/, '').toLowerCase()
         .replace(/[^a-z0-9-]+/g, '-').replace(/^-+/, '').slice(0, 60) || 'imported', name: chosen.name, mode: 'replace' as const,
         patch: row as unknown as Patch })
+      // An import that would replace presets of the same id says so and waits for a yes; one that only adds saves at once (PRM-5).
       const merged = [...own.filter(item => !presets.some(preset => preset.id === item.id)), ...presets]
-      await save.run(merged)
+      const replaced = presets.filter(preset => own.some(item => item.id === preset.id)).length
+      if (replaced) setPending({ merged, added: presets.length - replaced, replaced }); else await save.run(merged)
     } catch (failure) { notify(t('promptPresetImportFailed', { error: errorText(failure) })) }
   }
   return <Modal className="dt-preset-modal dt-preset-library" open={open} onClose={onClose} title={t('promptPresetsManage')}
@@ -190,12 +191,20 @@ function PresetLibrary({ open, library, config, reload, onClose }: {
         <div className="dt-actions">
           <Button variant="primary" size="sm" icon={<Icon name="plus" />} onClick={() => setEditing({ index: 'new', preset: blank() })}>
             {t('promptPresetNew')}</Button>
-          <Button variant="outline" size="sm" icon={<Icon name="copy" />} onClick={() => setEditing({ index: 'new', preset: fromConfig() })}>
+          <Button variant="secondary" size="sm" icon={<Icon name="copy" />} onClick={() => setEditing({ index: 'new', preset: fromConfig() })}>
             {t('promptPresetSaveDraft')}</Button>
           <Button variant="ghost" size="sm" icon={<Icon name="inbox" />} onClick={() => file.current?.click()}>{t('promptPresetImport')}</Button>
           <Button variant="ghost" size="sm" icon={<Icon name="external" />} disabled={!own.length} onClick={exported}>{t('promptPresetExport')}</Button>
           <input ref={file} type="file" accept="application/json,.json" hidden onChange={event => { void imported(event.currentTarget) }} />
         </div>
+        {pending && <div className="dt-banner dt-import-preview" role="alert">
+          <span>{t('promptPresetImportPreview', { added: pending.added, replaced: pending.replaced })}</span>
+          <span className="dt-banner-actions">
+            <Button variant="ghost" size="sm" onClick={() => setPending(undefined)}>{t('cancel')}</Button>
+            <Button variant="danger" size="sm" disabled={save.busy} onClick={() => { void save.run(pending.merged).then(() => setPending(undefined)) }}>
+              {t('promptPresetImportConfirm')}</Button>
+          </span>
+        </div>}
         <ul className="dt-preset-options">{library.presets.map(preset => {
           const index = own.indexOf(preset)
           const used = (config.presets ?? []).includes(preset.id)
@@ -212,9 +221,11 @@ function PresetLibrary({ open, library, config, reload, onClose }: {
                 onClick={() => setEditing({ index: 'new', preset: copyOf(preset) })} />
               {index >= 0 && <Button variant="ghost" size="sm" icon={<Icon name="review" />} aria-label={t('promptPresetEdit', { name: preset.name })}
                 title={t('promptPresetEdit', { name: preset.name })} onClick={() => setEditing({ index, preset })} />}
-              {index >= 0 && <Button variant="ghost" size="sm" icon={<Icon name="trash" />} disabled={used || save.busy}
-                aria-label={t('removeRow', { name: preset.name })} title={used ? t('promptPresetInUseHint') : t('remove')}
-                onClick={() => { void save.run(own.filter(item => item !== preset)) }} />}
+              {/* Removing a team preset is saved at once and cannot be undone, so it asks first, anchored to its button. */}
+              {index >= 0 && (used ? <Button variant="ghost" size="sm" icon={<Icon name="trash" />} disabled
+                aria-label={t('removeRow', { name: preset.name })} title={t('promptPresetInUseHint')} />
+                : <ConfirmButton danger iconOnly icon="trash" label={t('removeRow', { name: preset.name })} title={t('promptPresetDeleteTitle')}
+                  message={t('promptPresetDeleteConfirm', { name: preset.name })} onConfirm={() => save.run(own.filter(item => item !== preset))} />)}
             </span>
           </li>
         })}</ul>
@@ -235,24 +246,24 @@ function PresetEditor({ editing, taken, busy, onCancel, onSave }: {
   const extras = Object.keys(preset.patch.skills ?? {}).length + Object.keys(preset.patch.overrides ?? {}).length
   return <form className="dt-form dt-preset-editor" onSubmit={event => { event.preventDefault(); if (!problem) onSave({ ...preset, id }) }}>
     <div className="dt-grid2">
-      <label className="dt-field"><span className="dt-field-head">{t('promptPresetName')}</span>
-        <Input aria-label={t('promptPresetName')} value={preset.name} maxLength={80} onChange={event => setPreset({ ...preset, name: event.target.value,
+      <Field className="dt-field" label={t('promptPresetName')}>
+        <Input value={preset.name} maxLength={80} onChange={event => setPreset({ ...preset, name: event.target.value,
           ...editing.index === 'new' && !editing.preset.id ? { id: event.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
-            .replace(/^-+|-+$/g, '').slice(0, 60) } : {} })} /></label>
-      <label className="dt-field"><span className="dt-field-head">{t('promptPresetId')}</span>
-        <Input aria-label={t('promptPresetId')} className="dt-mono" value={preset.id} spellCheck={false} readOnly={editing.index !== 'new'}
-          onChange={event => setPreset({ ...preset, id: event.target.value })} /></label>
+            .replace(/^-+|-+$/g, '').slice(0, 60) } : {} })} /></Field>
+      <Field className="dt-field" label={t('promptPresetId')} readOnly={editing.index !== 'new'}>
+        <Input className="dt-mono" value={preset.id} spellCheck={false} onChange={event => setPreset({ ...preset, id: event.target.value })} />
+      </Field>
     </div>
-    <label className="dt-field"><span className="dt-field-head">{t('promptPresetDescription')}</span>
-      <Input aria-label={t('promptPresetDescription')} value={preset.description} maxLength={400} onChange={event => setPreset({ ...preset, description: event.target.value })} /></label>
-    <div className="dt-field"><span className="dt-field-head">{t('promptPresetModeLabel')}</span>
-      <SegmentedControl className="dt-segmented dt-field-segmented" label={t('promptPresetModeLabel')} value={preset.mode}
+    <Field className="dt-field" label={t('promptPresetDescription')}>
+      <Input value={preset.description} maxLength={400} onChange={event => setPreset({ ...preset, description: event.target.value })} />
+    </Field>
+    <Field className="dt-field" label={t('promptPresetModeLabel')} hint={t(`promptPresetModeHint.${preset.mode}`)}>
+      <SegmentedControl className="dt-field-segmented" label={t('promptPresetModeLabel')} value={preset.mode}
         options={(['append', 'replace'] as const).map(mode => ({ value: mode, label: t(`promptPresetMode.${mode}`) }))}
         onChange={mode => setPreset({ ...preset, mode })} />
-      <small>{t(`promptPresetModeHint.${preset.mode}`)}</small></div>
-    <div className="dt-subtabs" role="tablist" aria-label={t('promptSections')}>{SECTIONS.map(name => <button key={name} type="button"
-      role="tab" className="dt-subtab" aria-selected={section === name} onClick={() => setSection(name)}>
-      {t(`promptPart.${name}` as never)}{preset.patch[name] ? ' ·' : ''}</button>)}</div>
+    </Field>
+    <Tabs className="dt-subtabs" size="sm" idBase="dt-preset-section" label={t('promptSections')} value={section} onChange={setSection}
+      items={SECTIONS.map(name => ({ value: name, label: `${t(`promptPart.${name}` as never)}${preset.patch[name] ? ' ·' : ''}` }))} />
     <CodeEditor key={section} className="dt-preset-text" label={t('promptPresetSectionText')} minLines={12}
       placeholder={t('promptPresetSectionEmpty')} value={preset.patch[section] ?? ''}
       onChange={next => patch({ [section]: next || undefined })} />

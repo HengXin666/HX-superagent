@@ -5,14 +5,46 @@
  */
 
 /** A Store topic a write touches, a settings or prompts save, an agent's activity, or the host's health. */
-export type LiveTopic = 'trigger' | 'thread' | 'ticket' | 'decision' | 'outbox' | 'settings' | 'prompts' | 'activity' | 'health'
+export type LiveTopic = 'trigger' | 'thread' | 'ticket' | 'decision' | 'outbox' | 'settings' | 'prompts' | 'activity' | 'health' | 'stage'
+/** The pipeline step a domain event happens at, as the panel's map names them. */
+export type StageNode = 'source' | 'policy' | 'main' | 'executor' | 'reply'
+/** A step a piece of work took: the Engine's domain event, the step it happened at, and the Ticket, Thread or Trigger it concerns. */
+export interface Stage {
+  type: string; node: StageNode; at: string
+  ticketId?: string; threadKey?: string; triggerId?: string; decisionId?: string
+  /** The Assignment (the executor slot's piece of work) an `assignment.started` or `assignment.ended` concerns. */
+  assignmentId?: string
+  /** The rest of the event, such as a Decision's kind or a Ticket's outcome, as short text. */
+  detail?: string
+}
+/** Where each domain event happens. */
+export const STAGE_NODES: Readonly<Record<string, StageNode>> = {
+  'trigger.received': 'source', 'thread.subscribed': 'source', 'thread.unsubscribed': 'source',
+  'eval.started': 'policy', 'trigger.requeued': 'policy', 'policy.changed': 'policy',
+  'decision.recorded': 'main',
+  'ticket.created': 'executor', 'ticket.resumed': 'executor', 'assignment.started': 'executor', 'assignment.ended': 'executor',
+  'trigger.followup': 'executor',
+  'ticket.ended': 'reply',
+}
+/** A domain event as a step of the live feed. */
+export function stageOf(event: { type: string; at: string; data: object }): Stage {
+  const data = event.data as Record<string, unknown>
+  const text = (key: string) => typeof data[key] === 'string' ? { [key]: data[key] as string } : {}
+  const detail = ['kind', 'outcome', 'reason', 'strength', 'by'].map(key => typeof data[key] === 'string' ? data[key] as string : '')
+    .filter(Boolean).join(' · ')
+  const triggerId = typeof data.triggerId === 'string' ? data.triggerId : Array.isArray(data.triggerIds) ? String(data.triggerIds[0] ?? '') : ''
+  return { type: event.type, node: STAGE_NODES[event.type] ?? 'main', at: event.at, ...text('ticketId'), ...text('threadKey'),
+    ...text('decisionId'), ...text('assignmentId'), ...triggerId ? { triggerId } : {}, ...detail ? { detail: summarize(detail, 80) } : {} }
+}
 export interface Activity {
   sessionId: string; role: 'orchestrator' | 'worker' | 'subagent'; ticketId?: string
   /** `tool`: a tool call the model made; `turn`: a turn started or ended; `message`: the model answered in text. */
   kind: 'tool' | 'turn' | 'message'
   tool?: string; summary: string; at: string; state?: 'running' | 'idle'
 }
-export interface LiveEvent { seq: number; at: string; topic: LiveTopic; data?: Activity | Record<string, unknown> }
+/** What a `health` event carries: the health entries whose reading changed (a Source kind, `models`, `worker`, `runtime`...). */
+export interface HealthChange { entries: string[] }
+export interface LiveEvent { seq: number; at: string; topic: LiveTopic; data?: Activity | Stage | HealthChange | Record<string, unknown> }
 
 const CAPACITY = 1000
 /** Text that looks like a secret: a token, key or password value, a bearer credential, or a long opaque string. */
@@ -59,6 +91,21 @@ export class LiveHub {
     this.current.set(activity.sessionId, activity)
     this.emit('activity', activity)
   }
+  /** Record a step a piece of work took, which the console draws as it flows and traces per Ticket. */
+  stage(event: { type: string; at: string; data: object }): void { this.emit('stage', stageOf(event)) }
+  /**
+   * Record that health entries changed. Readings that change together (a Source and its sync, in one task) arrive as one event, so
+   * a flapping component reloads each view once per burst rather than once per entry.
+   */
+  health(name: string): void {
+    if (this.healthBatch) { this.healthBatch.add(name); return }
+    this.healthBatch = new Set([name])
+    queueMicrotask(() => {
+      const entries = [...this.healthBatch ?? []].sort(); this.healthBatch = undefined
+      if (entries.length) this.emit('health', { entries })
+    })
+  }
+  private healthBatch: Set<string> | undefined
   /** The latest activity of each Session that has one. */
   sessions(): Activity[] { return [...this.current.values()] }
   forget(sessionId: string): void { this.current.delete(sessionId) }
