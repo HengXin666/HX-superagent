@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { act, useState, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
-import { Button, Combobox, ConfirmDialog, DataTable, Drawer, EmptyState, FOCUS_FALLBACK, IconButton, KeyValue, Kbd, Modal, MultiSelect, Popover,
+import { Button, Combobox, ConfirmDialog, DataTable, DisclosureRow, Drawer, EmptyState, FOCUS_FALLBACK, IconButton, KeyValue, Kbd, Modal, MultiSelect, Pill, Popover,
   SegmentedControl, Select, Switch, Tabs, TabPanel, Textarea, ToastProvider, Tooltip, reorder, useDraft, useOptimistic, useToast, viewRows, type Column } from '../src/client/ui/index.ts'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -426,4 +426,32 @@ it('moves focus to the input when the last chip of a MultiSelect is removed', as
   await key(chip, 'Delete'); await paint()
   expect(el.querySelector('.hx-chip')).toBeNull()
   expect(document.activeElement?.tagName).toBe('INPUT')
+})
+
+it('Pill is a toggle button that Enter and Space press, with aria-pressed', async () => {
+  function Harness() { const [on, setOn] = useState(false); return <Pill active={on} onClick={() => setOn(!on)}>Open</Pill> }
+  const el = await mount(<Harness />)
+  const pill = el.querySelector<HTMLButtonElement>('button')!
+  expect(pill.getAttribute('type')).toBe('button')
+  expect(pill.getAttribute('aria-pressed')).toBe('false')
+  await click(pill)
+  expect(pill.getAttribute('aria-pressed')).toBe('true')
+})
+
+it('DisclosureRow toggles on Enter and Space, with aria-expanded and aria-controls pointing at the content it shows', async () => {
+  function Harness() {
+    const [open, setOpen] = useState(false)
+    return <DisclosureRow icon={<span />} title="Rule" open={open} onToggle={() => setOpen(!open)}><p>details</p></DisclosureRow>
+  }
+  const el = await mount(<Harness />)
+  const row = el.querySelector<HTMLElement>('[role="button"]')!
+  expect(row.tabIndex).toBe(0)
+  expect(row.getAttribute('aria-expanded')).toBe('false')
+  expect(row.hasAttribute('aria-controls')).toBe(false)
+  await key(row, 'Enter')
+  expect(row.getAttribute('aria-expanded')).toBe('true')
+  expect(document.getElementById(row.getAttribute('aria-controls')!)?.textContent).toBe('details')
+  await key(row, ' ')
+  expect(row.getAttribute('aria-expanded')).toBe('false')
+  expect(el.textContent).not.toContain('details')
 })

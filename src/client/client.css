@@ -311,8 +311,8 @@ div.dt-preview-head { color: var(--hx-c-label-secondary); }
 /* Pipeline map (pipeline-view.tsx): the dispatch path as five steps over SVG edges. */
 .dt-pipeline { margin: 0; padding: var(--hx-ui-space-3-5) var(--hx-ui-space-4) var(--hx-ui-space-3); border: var(--hx-ui-line); border-radius: var(--hx-ui-radius-xl); background: var(--hx-pipeline-bg); display: flex; flex-direction: column; gap: var(--hx-ui-space-2-5); }
 .dt-pipeline[data-compact] { padding: var(--hx-ui-space-2-5) var(--hx-ui-space-3); }
-.dt-pipeline-scroll { position: relative; overflow-x: auto; scrollbar-width: thin; }
-.dt-pipeline-svg { display: block; width: 100%; min-width: 640px; height: auto; overflow: visible; }
+.dt-pipeline-scroll { position: relative; overflow-x: auto; scrollbar-width: thin; container: dt-pipeline / inline-size; }
+.dt-pipeline-svg { display: block; width: 100%; min-width: 360px; overflow: visible; }
 .dt-pipeline-edge { fill: none; stroke: var(--hx-c-control-edge); stroke-width: 1.5; stroke-dasharray: 4 5; transition: stroke var(--hx-ui-dur-base) var(--hx-ui-ease); animation: dt-flow var(--hx-ui-dur-loop) linear infinite; }
 .dt-pipeline-edge[data-active] { stroke: var(--hx-c-brand-primary); stroke-dasharray: none; }
 .dt-pipeline-back { stroke-dasharray: 2 4; opacity: 0.7; }
@@ -323,7 +323,7 @@ div.dt-preview-head { color: var(--hx-c-label-secondary); }
 .dt-pipeline-arrowhead { fill: var(--hx-c-control-edge); }
 @keyframes dt-flow { to { stroke-dashoffset: -18; } }
 @keyframes dt-enter { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
-.dt-pipeline-nodes { position: absolute; inset: var(--hx-ui-space-3) 0 auto; min-width: 640px; list-style: none; margin: 0; padding: 0; display: flex; gap: var(--dt-pipeline-gap); }
+.dt-pipeline-nodes { position: absolute; inset: var(--hx-ui-space-3) 0 auto; min-width: 360px; list-style: none; margin: 0; padding: 0; display: flex; gap: var(--dt-pipeline-gap); }
 .dt-pipeline-node-slot { flex: 0 0 var(--dt-pipeline-w); display: flex; }
 .dt-pipeline-node-slot[data-parts] { flex-direction: column; gap: 0; }
 .dt-pipeline-parts { list-style: none; margin: var(--hx-ui-space-8-5) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--hx-ui-space-1); }
@@ -524,3 +524,47 @@ div.dt-preview-head { color: var(--hx-c-label-secondary); }
 .dt-presets-model { display: flex; align-items: center; gap: var(--hx-ui-space-1-5); }
 .dt-stack-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--hx-ui-space-4); align-items: start; }
 .dt-stack .dt-block-title { display: flex; align-items: center; gap: var(--hx-ui-space-2); }
+/* Console time axis: a name column and a track per lane over the same window; bars are the stretches a slot worked, ticks the calls and decisions, the line at the right edge is now. */
+.dt-timeline-grid { position: relative; display: flex; flex-direction: column; gap: var(--hx-ui-space-1); padding: var(--hx-ui-space-2) var(--hx-ui-space-3) var(--hx-ui-space-2-5); border: var(--hx-ui-line); border-radius: var(--hx-ui-radius-xl); background: var(--hx-c-bg-layer-1); }
+.dt-timeline-axis, .dt-timeline-row { display: grid; grid-template-columns: minmax(96px, 180px) minmax(0, 1fr); gap: var(--hx-ui-space-3); align-items: center; }
+.dt-timeline-scale { position: relative; height: 18px; font-size: var(--hx-ui-fs-micro); line-height: var(--hx-ui-lh-micro); color: var(--hx-c-label-caption); font-variant-numeric: tabular-nums; }
+.dt-timeline-scale > span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.dt-timeline-scale > span:first-child { transform: none; }
+.dt-timeline-scale > span:last-child { transform: translateX(-100%); }
+.dt-timeline-name { min-width: 0; display: inline-flex; align-items: center; gap: var(--hx-ui-space-1-5); padding: var(--hx-ui-space-0-75) var(--hx-ui-space-1-5); border: 0; border-radius: var(--hx-ui-radius-sm); background: transparent; color: var(--hx-c-label-secondary); font: inherit; font-size: var(--hx-ui-fs-caption); line-height: var(--hx-ui-lh-caption); text-align: left; }
+.dt-timeline-name > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.dt-timeline-name { cursor: pointer; transition: background var(--hx-ui-dur-base) var(--hx-ui-ease), color var(--hx-ui-dur-base) var(--hx-ui-ease); }
+button.dt-timeline-name:hover { background: var(--hx-c-interactive-bg-hover); color: var(--hx-c-label-primary); }
+.dt-timeline-track { position: relative; height: 22px; border-radius: var(--hx-ui-radius-sm); background: var(--hx-c-bg-module-platform); overflow: hidden; }
+.dt-timeline-row[data-role='ticket'] .dt-timeline-track { cursor: pointer; }
+.dt-timeline-row[data-role='main'] .dt-timeline-name { font-weight: var(--hx-ui-weight-semibold); color: var(--hx-c-label-primary); }
+.dt-timeline-row[data-traced] .dt-timeline-name { background: var(--hx-c-brand-selected); color: var(--hx-c-label-primary); }
+.dt-timeline-row[data-traced] .dt-timeline-track { box-shadow: var(--hx-ui-shadow-outline-strong); }
+.dt-timeline-gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--hx-c-border-l2); }
+.dt-timeline-bar { position: absolute; top: var(--hx-ui-space-1); bottom: var(--hx-ui-space-1); min-width: 3px; border-radius: var(--hx-ui-radius-xs); background: var(--hx-c-business-edge); transition: width var(--hx-ui-dur-base) var(--hx-ui-ease); }
+.dt-timeline-bar[data-open] { background: var(--hx-c-state-business-primary); }
+.dt-timeline-bar[data-outcome='failed'], .dt-timeline-bar[data-outcome='error'], .dt-timeline-bar[data-outcome='crashed'] { background: var(--hx-c-state-error-primary); opacity: 0.65; }
+.dt-timeline-bar[data-outcome='stopped'], .dt-timeline-bar[data-outcome='dropped'] { background: var(--hx-c-label-caption); opacity: 0.5; }
+.dt-timeline-bar[data-outcome='completed'], .dt-timeline-bar[data-outcome='merged'] { background: var(--hx-c-state-success-primary); opacity: 0.65; }
+.dt-timeline-tick { position: absolute; top: var(--hx-ui-space-0-5); bottom: var(--hx-ui-space-0-5); width: 2px; margin-left: calc(-1 * var(--hx-ui-space-0-25)); border-radius: var(--hx-ui-radius-bar); background: var(--hx-c-label-tertiary); pointer-events: auto; }
+.dt-timeline-tick[data-kind='tool'] { background: var(--hx-c-label-primary); }
+.dt-timeline-tick[data-kind='decision'] { background: var(--hx-c-brand-primary); }
+.dt-timeline-tick[data-kind='stage'] { background: var(--hx-c-state-warn-primary); }
+.dt-timeline-tick[data-kind='message'] { background: var(--hx-c-state-success-primary); }
+.dt-timeline-now { position: absolute; top: var(--hx-ui-space-2); bottom: var(--hx-ui-space-2); right: var(--hx-ui-space-3); width: 2px; border-radius: var(--hx-ui-radius-bar); background: var(--hx-c-brand-primary); pointer-events: none; }
+/* The base a role's chain chose, and the warning when a problem in the chain keeps it from taking effect. */
+.dt-overlay-base { margin: 0; display: flex; align-items: center; gap: var(--hx-ui-space-1-5); font-size: var(--hx-ui-fs-caption); line-height: var(--hx-ui-lh-caption); color: var(--hx-c-label-secondary); }
+.dt-overlay-base[data-blocked] { padding: var(--hx-ui-space-1) var(--hx-ui-space-2); border-radius: var(--hx-ui-radius-sm); background: var(--hx-c-warn-soft); color: var(--hx-c-state-warn-primary); }
+/* A preset's layer on the map sits indented under its step and carries the preset's own hue, as its chip does. */
+.dt-pipeline-part[data-depth] { width: calc(100% - var(--hx-ui-space-2-5)); margin-left: var(--hx-ui-space-2-5); }
+.dt-pipeline-part[data-hued] { border-left-color: var(--hx-preset-tint); }
+.dt-pipeline-part[data-hued][data-state='error'] { border-left-color: var(--hx-c-state-error-primary); }
+/* A narrow panel keeps all five steps in view: the step's subtitle and icon give way before the names do. */
+@container dt-pipeline (max-width: 720px) {
+  .dt-pipeline-sub { display: none; }
+  .dt-pipeline-node { gap: var(--hx-ui-space-1-5); padding: 0 var(--hx-ui-space-2); }
+}
+@container dt-pipeline (max-width: 560px) {
+  .dt-pipeline-icon { display: none; }
+  .dt-pipeline-part-value { display: none; }
+}

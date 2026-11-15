@@ -118,3 +118,35 @@ it('has no keyboard trap and no control a keyboard cannot reach on any page', as
   }
   expect(problems).toEqual([])
 })
+
+it('skips the header and the page tabs with the first Tab stop, then continues from the page content', async () => {
+  await mount()
+  await press('Tab')
+  const skip = focused()
+  expect(skip?.matches('a.dt-skip'), `first Tab stop is ${describe(skip)}`).toBe(true)
+  expect(skip?.textContent).toBe(zh.skipToMain)
+  await press('Enter')
+  expect(focused()?.id).toBe('dt-page')
+  await press('Tab')
+  expect(document.getElementById('dt-page')?.contains(focused()), `Tab went to ${describe(focused())}`).toBe(true)
+})
+
+it('reorders a capability pack chain with Alt+arrows, hears the new place, and saves the order with the keyboard only', async () => {
+  server.settings.executor.overlays = ['no-web', 'careful-review']
+  await mount()
+  await goTo('settings')
+  await tabTo(element => element.matches('.dt-settings-link') && named(zh['promptPart.runtime/work'])(element), { what: 'the Executor group' })
+  await press('Enter')
+  await tabTo(element => element.matches('.dt-overlay-bar .hx-chip') && !!element.textContent?.includes('No web'),
+    { what: 'the first pack chip' })
+  await press('ArrowRight', { altKey: true })
+  const names = () => [...document.querySelectorAll('.dt-overlay-bar .dt-preset-chip-name')].map(item => item.textContent)
+  expect(names()).toEqual(['谨慎改动 / Careful changes', '离线 / No web'])
+  // Focus follows the moved chip, and the live region says where it went.
+  expect(focused()?.textContent).toContain('No web')
+  expect(focused()).not.toBe(document.body)
+  expect(document.querySelector('.dt-overlay-bar [aria-live]')?.textContent).toContain('2')
+  await tabTo(named(zh.save), { what: 'Save' })
+  await press('Enter')
+  expect(server.settings.executor).toMatchObject({ overlays: ['careful-review', 'no-web'] })
+})

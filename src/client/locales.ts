@@ -101,6 +101,7 @@ const TEXT = {
   openMaster: ['打开主 Session', 'Open main Session'],
   openFullPage: ['在整页打开', 'Open as a full page'],
   pagesLabel: ['dsh-superagent 页面', 'dsh-superagent pages'],
+  skipToMain: ['跳到主内容', 'Skip to main content'],
   searchPlaceholder: ['搜索工单、线程、触发或链接', 'Search Tickets, Threads, Triggers or links'],
   searchLabel: ['搜索', 'Search'],
   searchFound: ['找到 {tickets} 个工单、{threads} 个线程、{items} 条触发', 'Found {tickets} Tickets, {threads} Threads and {items} Triggers'],

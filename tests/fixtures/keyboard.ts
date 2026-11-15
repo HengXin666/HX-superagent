@@ -52,7 +52,12 @@ function defaultAction(target: HTMLElement, key: string, init: KeyboardEventInit
     const order = tabOrder()
     if (!order.length) return
     const index = order.indexOf(target)
-    const next = index < 0 ? (init.shiftKey ? order.at(-1) : order[0]) : order[(index + (init.shiftKey ? -1 : 1) + order.length) % order.length]
+    // From an element outside the order (a focused page region with tabindex -1), the browser goes on from that point in
+    // the document, as it does after a skip link or a focus fallback: the next stop after it, or the one before it with Shift.
+    const after = (element: HTMLElement) => !!(target.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const from = target === document.body ? undefined
+      : init.shiftKey ? order.filter(element => !after(element) && !target.contains(element)).at(-1) : order.find(after)
+    const next = index < 0 ? from ?? (init.shiftKey ? order.at(-1) : order[0]) : order[(index + (init.shiftKey ? -1 : 1) + order.length) % order.length]
     next?.focus()
     return
   }
