@@ -143,6 +143,11 @@ function Pages({ route, drawer, openTab, closeDrawer, expandDrawer, deploymentFo
     }
   })()
   return <div className="dt-page">
+    {/* WCAG 2.4.1: the first Tab stop skips the header and the page tabs straight to the page's content. */}
+    <a className="dt-skip" href="#dt-page" onClick={event => {
+      event.preventDefault()
+      document.getElementById('dt-page')?.focus({ preventScroll: false })
+    }}>{t('skipToMain')}</a>
     <div className="dt-column">
       <Header masterId={state?.masterId} />
       <LoadState error={error} loading={false} have={!!state} />
