@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, expandRepositoryPattern, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -17,9 +17,15 @@ export interface SetupHost {
 export const githubExtras = (settings: Settings): { id: string; repository: string }[] => Object.entries(settings.sources)
   .filter(([id, stored]) => id !== 'github' && stored.kind === 'github' && stored.enabled)
   .map(([id, stored]) => ({ id, repository: typeof stored.config.repository === 'string' ? stored.config.repository.trim() : '' }))
-const setupFields = (settings: Settings) =>
-  JSON.stringify([Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')), githubExtras(settings)])
-export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
+const accountFields = (settings: Settings) =>
+  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
+/** Whether a setup-read field changed: an account field, or the set of extra GitHub repositories. */
+export const setupChanged = (before: Settings, after: Settings): boolean => accountsChanged(before, after) || extrasChanged(before, after)
+/** Whether an account field (the default repository, a CLI) changed, which takes a restart of dsh-superagent. */
+export const accountsChanged = (before: Settings, after: Settings): boolean => accountFields(before) !== accountFields(after)
+/** Whether only the set of enabled extra GitHub repositories changed, which setup applies in place without a restart. */
+export const extrasChanged = (before: Settings, after: Settings): boolean =>
+  JSON.stringify(githubExtras(before)) !== JSON.stringify(githubExtras(after))
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -34,6 +40,8 @@ export class Setup {
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
   private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
+  /** The last repository check `checkAccounts` ran, which `refreshRepositories` reuses for the same repositories instead of probing again. */
+  private checked?: { key: string; deployment: Deployment }
   constructor(private readonly host: SetupHost) {
     this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
     this.variables = agentVariables(host.machine.stateDir)
@@ -70,6 +78,7 @@ export class Setup {
       const extras = githubExtras(settings)
       const resolved = await resolveDeployment(machine, settings.sources.github?.config, this.probe(), undefined, extras)
         .catch((error: unknown) => { if (error instanceof SetupError) return undefined; throw error })
+      if (resolved) this.checked = { key: JSON.stringify(extras), deployment: resolved }
       const problems = Object.entries(resolved?.repositoryProblems ?? {})
       if (problems.length) {
         const named = new Map(extras.map(extra => [extra.id, extra.repository]))
@@ -80,6 +89,32 @@ export class Setup {
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
       : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
+  }
+  /**
+   * Verifies the extra GitHub repositories of `settings` again and swaps them into the running deployment, so a repository added
+   * to or removed from the table is polled from the next round on without restarting dsh-superagent (which would interrupt running
+   * Sessions and unmount the panel while it starts again). The default repository and the accounts are kept as they were.
+   */
+  async refreshRepositories(settings: Settings): Promise<void> {
+    if (!this.resolved) return
+    const { machine } = this.host
+    const extras = githubExtras(settings)
+    const checked = this.checked?.key === JSON.stringify(extras) ? this.checked.deployment : undefined
+    this.checked = undefined
+    const deployment = checked ?? await resolveDeployment(machine, settings.sources.github?.config, this.probe(), undefined, extras)
+    for (const [id, problem] of Object.entries(deployment.repositoryProblems ?? {})) this.host.context.logger.warn('dsh-superagent leaves GitHub instance %s out: %s', id, problem)
+    const { repositories: _repositories, repositoryProblems: _problems, ...accounts } = this.resolved
+    this.resolved = { ...accounts, ...extras.length
+      ? { repositories: deployment.repositories ?? {}, repositoryProblems: deployment.repositoryProblems ?? {} } : {} }
+  }
+  /** The repositories the agent account can push to that match `pattern` (such as `owner/**`), with the CLI setup verified. */
+  async expandRepositories(pattern: string): Promise<string[]> {
+    if (!this.resolved) throw new UserError('patternUnavailable', { pattern })
+    const found = await expandRepositoryPattern(this.resolved.github.cli, pattern, this.probe()).catch((error: unknown) => {
+      throw new UserError('patternFailed', { pattern, error: error instanceof Error ? error.message : String(error) })
+    })
+    if (!found.length) throw new UserError('patternEmpty', { pattern })
+    return found
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)

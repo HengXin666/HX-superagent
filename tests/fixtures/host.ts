@@ -147,6 +147,14 @@ export async function startRuntime(seed?: (store: Store) => void) {
     // Extra GitHub instances: one repository the agent can push to and one it can only read.
     [`${AGENT} api repos/acme/gadgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/Gadgets","push":true}\n',
     [`${AGENT} api repos/acme/readonly --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/readonly","push":false}\n',
+    [`${AGENT} api repos/acme/Gadgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/Gadgets","push":true}\n',
+    [`${AGENT} api repos/acme/tools --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/tools","push":true}\n',
+    // The repositories the agent account can reach, which a pattern such as acme/** is expanded against.
+    [`${AGENT} api --paginate user/repos?per_page=100&affiliation=owner,collaborator,organization_member --jq .[] | {name: .full_name, push: .permissions.push, fork: .fork, archived: .archived}`]:
+      ['{"name":"acme/widgets","push":true,"fork":false,"archived":false}', '{"name":"acme/Gadgets","push":true,"fork":false,"archived":false}',
+        '{"name":"acme/tools","push":true,"fork":false,"archived":false}', '{"name":"acme/readonly","push":false,"fork":false,"archived":false}',
+        '{"name":"acme/forked","push":true,"fork":true,"archived":false}', '{"name":"acme/old","push":true,"fork":false,"archived":true}',
+        '{"name":"other/thing","push":true,"fork":false,"archived":false}'].join('\n'),
     [`${BOT} auth status`]: JSON.stringify({ appId: 'cli_bot', brand: 'feishu', identities: { bot: { status: 'ready' } } }),
     [`${BOT} config strict-mode`]: 'strict-mode: bot (source: profile)',
     [`${BOT} api GET /open-apis/bot/v3/info --as bot --format ndjson`]: '{"bot":{"open_id":"ou_bot"},"code":0,"msg":"ok"}',

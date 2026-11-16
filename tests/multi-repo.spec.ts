@@ -14,7 +14,7 @@ import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
-import { githubInstances, instanceOf, repositoryOf, type Deployment } from '../src/deployment.ts'
+import { githubInstances, instanceOf, matchesPattern, repositoryOf, type Deployment } from '../src/deployment.ts'
 import { Setup } from '../src/app/setup.ts'
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
@@ -222,8 +222,11 @@ describe('saving GitHub instances', () => {
       store.blockRevision('policy'), 'panel')
     const revision = () => store.blockRevision('instances:github')
     const added = await settings.saveInstances('github', [{ config: { repository: GADGETS, cli: 'ignored' }, policyFrom: 'github' }], revision(), 'panel')
-    expect(added).toMatchObject({ saved: true, restarting: true, instances: [{ id: 'github-2', enabled: true, config: { repository: GADGETS } }] })
-    expect(restart).toHaveBeenCalled()
+    // Adding a repository applies in place: no restart, and the running deployment polls it from the next round.
+    expect(added).toMatchObject({ saved: true, restarting: false, instances: [{ id: 'github-2', enabled: true,
+      config: { repository: GADGETS, observeIssues: true, observePulls: true, observeComments: true, observeCi: false } }] })
+    expect(restart).not.toHaveBeenCalled()
+    expect(h.runtime.deployment.repositories).toEqual({ 'github-2': 'acme/Gadgets' })
     // The account's fields stay on the default instance; the new one starts from its allowed list.
     expect(store.settings().sources['github-2']).toMatchObject({ kind: 'github', config: { repository: GADGETS, cli: '' } })
     expect(store.settings().policy.sources['github-2']?.allowed).toEqual([{ id: 'alice' }])
@@ -242,9 +245,40 @@ describe('saving GitHub instances', () => {
     expect(store.settings().sources['github-2']).toBeUndefined()
     const again = await settings.saveInstances('github', [{ config: { repository: GADGETS } }], revision(), 'panel')
     expect(again.instances.map(row => row.id)).toEqual(['github-3'])
+    expect(h.runtime.deployment.repositories).toEqual({ 'github-3': 'acme/Gadgets' })
     // The settings view lists the instance with its kind's fields less the account's, and the block's revision.
     const view = h.runtime.settings.view()
     expect(view.instances.github?.revision).toBe(revision())
     expect(settings.block('instances:github').value).toEqual(again.instances)
+  })
+})
+
+describe('repository patterns', () => {
+  it('matches an owner and a name glob, case-insensitively', () => {
+    expect(matchesPattern('acme/**', 'ACME/tools')).toBe(true)
+    expect(matchesPattern('acme/*', 'acme/tools')).toBe(true)
+    expect(matchesPattern('acme/hx-*', 'acme/HX-ui')).toBe(true)
+    expect(matchesPattern('acme/hx-*', 'acme/ui')).toBe(false)
+    expect(matchesPattern('acme/**', 'other/tools')).toBe(false)
+    expect(parseRepositories('HengXin666/** acme/a').repositories).toEqual(['HengXin666/**', 'acme/a'])
+  })
+  it('expands owner/** into every pushable repository of the owner, without forks, archives or the default one, and without a restart', async () => {
+    h = await startRuntime()
+    const restart = vi.spyOn(Setup.prototype, 'restart').mockImplementation(() => {})
+    const { settings, store } = h.runtime
+    const saved = await settings.saveInstances('github', [{ config: { repository: 'acme/**' } }], store.blockRevision('instances:github'), 'panel')
+    expect(saved.restarting).toBe(false)
+    expect(restart).not.toHaveBeenCalled()
+    expect(saved.instances.map(row => [row.config.repository, row.config.observeIssues, row.config.observePulls, row.config.observeComments]))
+      .toEqual([['acme/Gadgets', true, true, true], ['acme/tools', true, true, true]])
+    expect(Object.values(h.runtime.deployment.repositories ?? {})).toEqual(['acme/Gadgets', 'acme/tools'])
+    // The new repositories start from the default repository's allowed accounts.
+    expect(store.settings().policy.sources[saved.instances[0]!.id]).toEqual(store.settings().policy.sources.github)
+    // Saving the pattern again adds nothing it already lists.
+    const again = await settings.saveInstances('github', [...saved.instances, { config: { repository: 'acme/*' } }],
+      store.blockRevision('instances:github'), 'panel')
+    expect(again.instances.map(row => row.id)).toEqual(saved.instances.map(row => row.id))
+    await expect(settings.saveInstances('github', [{ config: { repository: 'nobody/**' } }], store.blockRevision('instances:github'), 'panel'))
+      .rejects.toMatchObject({ code: 'patternEmpty' })
   })
 })

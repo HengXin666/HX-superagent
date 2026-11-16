@@ -11,9 +11,10 @@ import { presetCompatibility } from './agent-presets.ts'
 import { resolveRoleModel } from './role-models.ts'
 import { changedPaths, settingsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
-import { setupChanged, type Setup } from './setup.ts'
+import { accountsChanged, extrasChanged, setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
+import { isRepositoryPattern } from '../deployment.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -92,6 +93,8 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Bl
     guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
 }
+/** What a GitHub repository added to the table receives besides what addresses the agent: its new Issues, new PRs and comments. */
+const NEW_REPOSITORY = { observeIssues: true, observePulls: true, observeComments: true } as const
 const InstancesValue = z.object({
   instances: z.record(z.string(), z.object({ enabled: z.boolean(), config: z.record(z.string(), z.unknown()) })),
   policy: z.record(z.string(), z.record(z.string(), z.unknown()).and(z.object({ allowed: z.array(z.object({ id: z.string() }).loose()) })))
@@ -119,7 +122,7 @@ export interface SettingsHost {
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
-  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart'>
+  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart' | 'refreshRepositories' | 'expandRepositories'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
 }
@@ -229,7 +232,9 @@ export class Settings {
       const delivery = await sessions.delivery(`settings:${block}`)
       return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
+    // An account change restarts dsh-superagent so setup runs again; a change of the extra repositories only is applied in place.
+    const restarting = accountsChanged(old, settings) || !this.host.setup.configured()
+    const refresh = !restarting && extrasChanged(old, settings)
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
@@ -244,11 +249,14 @@ export class Settings {
     const blocked = settings.executor.blockedCommands
     const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
     if (changed) await this.host.setup.blockCommands(blocked)
+    // Should the repositories fail to apply in place, setup runs again through a restart, as it did before.
+    const reapplied = refresh ? await this.host.setup.refreshRepositories(settings).then(() => true, () => false) : true
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
-    const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
-    if (restarting) this.host.setup.restart()
+    const restarts = restarting || !reapplied
+    const delivery = restarts ? 'pending' : await sessions.delivery(`settings:${block}`)
+    if (restarts) this.host.setup.restart()
     else this.host.requestPass()
-    return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }
+    return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting: restarts, context_delivery: delivery }
   }
   /**
    * Pauses or resumes processing (new evaluations, worker dispatch, and channel delivery, while Sources continue recording
@@ -290,9 +298,9 @@ export class Settings {
     const owner = sources.kind(kind)
     const multiple = owner?.multiple
     if (!owner || owner.kind !== kind || !multiple) throw new UserError('notMultiple', { source: kind })
-    const parsed = z.array(InstanceRow).parse(rows)
     const current = store.settings()
     const existing = sources.instancesOf(kind, current).filter(id => id !== kind)
+    const parsed = kind === 'github' ? await this.expandPatterns(z.array(InstanceRow).parse(rows), current) : z.array(InstanceRow).parse(rows)
     if (parsed.length + 1 > multiple.max) throw new UserError('instancesTooMany', { max: String(multiple.max), source: kind })
     let number = Math.max(store.get(KV.settings.instanceNumber(kind)) ?? 1,
       ...existing.map(id => Number(/-(\d+)$/.exec(id)?.[1] ?? 0)))
@@ -305,7 +313,10 @@ export class Settings {
     for (const row of parsed) {
       const id = row.id !== undefined && existing.includes(row.id) ? row.id : `${kind}-${++number}`
       if (id in instances) throw new UserError('instanceDuplicate', { label: id })
-      const config = Object.fromEntries(Object.entries(row.config).filter(([key]) => !shared.has(key)))
+      const added = !existing.includes(id)
+      // A repository added to the table receives its new Issues, new PRs and comments unless its row says otherwise.
+      const config = Object.fromEntries(Object.entries({ ...kind === 'github' && added ? NEW_REPOSITORY : {}, ...row.config })
+        .filter(([key]) => !shared.has(key)))
       const result = owner.schema.safeParse(config)
       if (!result.success) throw new UserError('instanceInvalid', { id: String(row.config.repository ?? id), error: result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') })
       const label = multiple.label(result.data)
@@ -327,6 +338,30 @@ export class Settings {
     const result = await this.save(`instances:${kind}`, { instances, policy }, revision, origin)
     if (result.saved) store.set(KV.settings.instanceNumber(kind), number)
     return { ...result, instances: this.instanceRows(kind) }
+  }
+  /**
+   * Replaces each GitHub row whose repository is a pattern (such as `owner/**`) with one row per repository the agent account can
+   * push to that matches it, leaving out the default repository and those other rows already list. Each such row takes the
+   * pattern row's switches and `policyFrom` (the default instance's when it names none).
+   */
+  private async expandPatterns(rows: z.infer<typeof InstanceRow>[], settings: SettingsValue): Promise<z.infer<typeof InstanceRow>[]> {
+    const repositoryOf = (row: { config: Record<string, unknown> }) => typeof row.config.repository === 'string' ? row.config.repository.trim() : ''
+    if (!rows.some(row => isRepositoryPattern(repositoryOf(row)))) return rows
+    const primary = settings.sources.github?.config.repository
+    const taken = new Set([...typeof primary === 'string' ? [primary.toLowerCase()] : [],
+      ...rows.map(repositoryOf).filter(name => !isRepositoryPattern(name)).map(name => name.toLowerCase())])
+    const expanded: z.infer<typeof InstanceRow>[] = []
+    for (const row of rows) {
+      const pattern = repositoryOf(row)
+      if (!isRepositoryPattern(pattern)) { expanded.push(row); continue }
+      const { id: _id, ...rest } = row
+      for (const repository of await this.host.setup.expandRepositories(pattern)) {
+        if (taken.has(repository.toLowerCase())) continue
+        taken.add(repository.toLowerCase())
+        expanded.push({ ...rest, config: { ...row.config, repository }, policyFrom: row.policyFrom ?? 'github' })
+      }
+    }
+    return expanded
   }
   /** Returns the IDs of installed, enabled Sources whose policy section can synchronize now (empty while setup is not configured). */
   syncable(): string[] {

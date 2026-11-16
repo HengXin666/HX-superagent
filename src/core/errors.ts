@@ -60,6 +60,9 @@ export const USER_ERRORS = {
   instanceDuplicate: ['refused', '{label} is listed more than once'],
   instanceInUse: ['refused', 'Instance {id} ({label}) still has open tickets: {tickets}. End them before removing it'],
   repositoriesRefused: ['refused', 'The agent account cannot work in these repositories: {problems}'],
+  patternEmpty: ['refused', 'No repository the agent account can push to matches {pattern} (forks and archived repositories are left out)'],
+  patternUnavailable: ['refused', 'Repository patterns such as {pattern} are expanded once setup has verified the agent account; finish setup first'],
+  patternFailed: ['refused', 'Listing the repositories for {pattern} failed: {error}'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
