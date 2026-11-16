@@ -100,6 +100,18 @@ export class Commands {
     const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
     return validItems(item, pages.flat(), tally)
   }
+  /**
+   * Reads the agent account's notification inbox (`notifications?<query>`): the one GitHub read outside the configured repository,
+   * made once per polling round for every repository the installation receives, whatever their number.
+   */
+  async inbox(query: string, ...flags: string[]): Promise<string> {
+    return this.run(this.deployment.github.cli, ['api', `notifications?${query}`, ...flags])
+  }
+  /** Every page of the agent account's notification inbox, skipping items that fail schema validation. */
+  async inboxPages<T>(item: z.ZodType<T>, query: string, tally?: Tally): Promise<T[]> {
+    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', `notifications?${query}`, '--paginate', '--slurp']))
+    return validItems(item, pages.flat(), tally)
+  }
   private path(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
     if (outside) throw new Error('GitHub calls are restricted to the configured repository')

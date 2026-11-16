@@ -88,7 +88,7 @@ export function RepositoryTable() {
   // A switch is on when every repository of the table has it on; switching it sets it on every one.
   const observing = (key: Observed) => current.length > 0 && current.every(row => row.observe?.[key] ?? true)
   const observeAll = (key: Observed, on: boolean) => edit(current.map(row => ({ ...row, observe: { ...row.observe, [key]: on } })))
-  const full = current.length + 1 >= block.max
+  const full = block.max !== undefined && current.length + 1 >= block.max
   const edit = (next: RepositoryRow[]) => { draft.edit(next); setInvalid(undefined) }
   const add = () => {
     const row: RepositoryRow = { id: freshId(), repository: '', enabled: true, observe: Object.fromEntries(OBSERVED.map(key => [key, true])) }
@@ -100,7 +100,7 @@ export function RepositoryTable() {
     const known = new Set([primaryRepository, ...current.map(row => row.repository)].map(name => name.trim().toLowerCase()))
     const added = repositories.filter(name => !known.has(name.toLowerCase())).map(repository => ({ id: freshId(), repository, enabled: true,
       observe: Object.fromEntries(OBSERVED.map(key => [key, true])) }))
-    edit([...current, ...added].slice(0, block.max - 1))
+    edit(block.max === undefined ? [...current, ...added] : [...current, ...added].slice(0, block.max - 1))
     setBulk('')
     if (unread.length) setInvalid(unread)
   }
@@ -114,7 +114,7 @@ export function RepositoryTable() {
     <div className="dt-row-buttons">
       <Button variant="primary" size="sm" icon={<Icon name="plus" />} disabled={busy || full} onClick={add}>{t('addRepo')}</Button>
     </div></div>
-    <Hint>{t('repositoriesHint', { max: block.max })}</Hint>
+    <Hint>{t('repositoriesHint')}</Hint>
     <ul className="dt-rows" style={{ ['--dt-columns' as string]: 2 }}>
       <li className="dt-rows-item"><span className="dt-row-label dt-mono">{primaryRepository || '—'}</span>
         <span className="dt-hint">{t('repositoriesDefault')}</span></li>

@@ -301,7 +301,7 @@ export class Settings {
     const current = store.settings()
     const existing = sources.instancesOf(kind, current).filter(id => id !== kind)
     const parsed = kind === 'github' ? await this.expandPatterns(z.array(InstanceRow).parse(rows), current) : z.array(InstanceRow).parse(rows)
-    if (parsed.length + 1 > multiple.max) throw new UserError('instancesTooMany', { max: String(multiple.max), source: kind })
+    if (multiple.max !== undefined && parsed.length + 1 > multiple.max) throw new UserError('instancesTooMany', { max: String(multiple.max), source: kind })
     let number = Math.max(store.get(KV.settings.instanceNumber(kind)) ?? 1,
       ...existing.map(id => Number(/-(\d+)$/.exec(id)?.[1] ?? 0)))
     const shared = new Set(multiple.shared)

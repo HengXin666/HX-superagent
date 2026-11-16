@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { key, type Thread } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
-import { CliError, validItems, type Tally } from '../infra/commands.ts'
+import { CliError, validItems, type Commands, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
 import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, SOURCE }
   from './github-trigger.ts'
@@ -17,7 +17,7 @@ import type { SourceRegistry } from './registry.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { githubInstances, repositoryOf } from '../deployment.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
+import { cursorAt, pause, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import { z } from 'zod'
 
@@ -52,13 +52,17 @@ function scopeOf(meta: Record<string, unknown>): Scope | undefined {
 }
 /** Fields of the agent account, shared by every GitHub instance and kept on the default one. */
 const SHARED = ['cli', 'pollSeconds', 'failuresBeforeError'] as const
-/** One GitHub instance per repository: the most an installation runs, the default one included. */
-export const MAX_REPOSITORIES = 50
-/** Repositories whose rounds fit one minute; more of them lengthen the interval so the account stays within GitHub's hourly limit. */
-const REPOSITORIES_PER_MINUTE = 15
+/**
+ * Repositories whose default-branch CI fits one minute. The CI of a repository with `observeCi` on is the one read made per
+ * repository each round (everything else comes from the account's inbox, one read for them all), so more of them lengthen the
+ * interval to keep the account within GitHub's hourly limit. The number of repositories itself is not limited.
+ */
+const CI_REPOSITORIES_PER_MINUTE = 15
+/** How many repositories the agent account starts or stops watching in one round, within GitHub's limit on bursts of writes. */
+const WATCH_CHANGES_PER_ROUND = 20
 export const githubKind: SourceKind<GithubConfig> = {
   kind: SOURCE,
-  multiple: { max: MAX_REPOSITORIES, shared: SHARED, label: config => config.repository },
+  multiple: { shared: SHARED, label: config => config.repository },
   title: { zh: 'GitHub', en: 'GitHub' },
   description: { zh: '智能体的 GitHub 账号；接收仓库里发给它的通知、已订阅 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'The agent\'s GitHub accounts; receives notifications to it in the repository, discussion on subscribed Issues and PRs, CI changes, and PR merge or close.' },
   schema: GithubConfigSchema,
@@ -222,13 +226,21 @@ async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => So
   if (!ctx.configured()) { ctx.report('github', health('paused', 'setupPending')); return }
   while (!signal.aborted) {
     const instances = contexts()
+    const configured = instances.filter(instance => instance.config<GithubConfig>(SOURCE))
+    // One read of the account's inbox serves every repository, from the earliest cursor among them; each takes its own notifications.
+    const now = new Date().toISOString()
+    const earliest = configured.map(instance => instance.state.get(KV.github.since) ?? now).sort()[0]
+    const inbox = earliest === undefined ? undefined : readInbox(ctx.commands.withSignal(signal), earliest)
+    // Each instance's round reports a failed read as its own failure.
+    inbox?.catch(() => { /* awaited by every round */ })
+    const budget: WatchBudget = { left: WATCH_CHANGES_PER_ROUND }
     let interval = 60
     for (const instance of instances) {
       if (signal.aborted) break
       const id = instanceId(instance)
       const config = instance.config<GithubConfig>(SOURCE)
       try {
-        if (config) interval = Math.max(interval, await pollRound(instance, signal))
+        if (config) interval = Math.max(interval, await pollRound(instance, signal, inbox, budget))
         else instance.report('github', health('paused', 'sourceOff'))
         failures.set(id, 0)
       } catch (error) {
@@ -238,7 +250,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => So
         if (!signal.aborted && failed) instance.report('github', failed)
       }
     }
-    const spread = 60 * Math.ceil(instances.length / REPOSITORIES_PER_MINUTE)
+    const ci = configured.filter(instance => instance.config<GithubConfig>(SOURCE)?.observeCi).length
+    const spread = 60 * Math.ceil(ci / CI_REPOSITORIES_PER_MINUTE)
     await pause(Math.max(interval, spread, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
   }
 }
@@ -261,28 +274,18 @@ function failed(ctx: SourceContext, round: Round, number: number, error: unknown
   else round.failures.push(`#${number}: ${String(error)}`)
   ctx.threads.patch(`${instanceId(ctx)}:${number}`, { pollError: String(error) })
 }
-function included(raw: string): { headers: string; body: string } {
-  const split = raw.search(/\r?\n\r?\n/)
-  if (split < 0) throw new Error('GitHub returned no HTTP headers')
-  return { headers: raw.slice(0, split), body: raw.slice(split).trim() }
-}
-const ListedSchema = CommentSchema.extend({ issue_url: z.string().nullish(), pull_request_url: z.string().nullish() })
-/** Repository-wide event streams; GitHub's `/issues` endpoint includes PRs, and `/issues/comments` covers issue and PR conversation comments (excluding inline review comments). */
-const STREAMS = [
-  { id: 'issues', observed: (config: GithubConfig) => config.observeIssues || config.observePulls, path: 'issues?state=all' },
-  { id: 'comments', observed: (config: GithubConfig) => config.observeComments, path: 'issues/comments?' },
-  { id: 'review-comments', observed: (config: GithubConfig) => config.observeComments, path: 'pulls/comments?' },
-] as const
-/** Polls repository-wide streams (new Issues/PRs, comments, default-branch CI); each stream reads from when it was switched on, resets when switched off, and fails independently. */
-async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
+/** What one round may still change in the repositories the agent account watches, shared by every instance of the round. */
+export interface WatchBudget { left: number }
+/**
+ * Keeps the agent account watching the repository while its Issues, PRs or comments are received in full, then polls the default
+ * branch's CI when it is observed. Watching makes GitHub put every new Issue, PR, comment and review of the repository in the
+ * account's inbox, which one read a round covers for every repository, so a repository costs no read of its own.
+ */
+async function pollRepository(ctx: SourceContext, round: Round, budget: WatchBudget): Promise<void> {
   const config = ctx.config<GithubConfig>(SOURCE)
   if (!config) return
-  for (const stream of STREAMS) {
-    if (stopped(ctx, round)) return
-    if (!stream.observed(config)) { ctx.state.set(KV.github.stream(stream.id), undefined); continue }
-    try { await readStream(ctx, round, stream.id, stream.path, config) }
-    catch (error) { if (!stopped(ctx, round)) round.failures.push(`${stream.id}: ${String(error)}`) }
-  }
+  try { await watchRepository(ctx, round, config, budget) }
+  catch (error) { if (!stopped(ctx, round)) round.failures.push(`watching: ${String(error)}`) }
   // When CI observation is turned off, clear the failure baseline but preserve the revision counter so future triggers have unique IDs.
   if (!config.observeCi) {
     const seen = ctx.state.get(KV.github.branchCi)
@@ -292,58 +295,32 @@ async function pollRepository(ctx: SourceContext, round: Round): Promise<void> {
   try { await pollBranchCi(ctx, round) }
   catch (error) { if (!stopped(ctx, round)) round.failures.push(`default branch CI: ${String(error)}`) }
 }
+/** The repository's watch of the agent account, read and changed at `repos/{owner}/{repo}/subscription`. */
+const SUBSCRIPTION = 'subscription'
+const SubscriptionSchema = z.looseObject({ subscribed: z.boolean(), ignored: z.boolean() })
 /**
- * Polls one repository-wide event stream (oldest first) since its cursor and steps the cursor to five seconds before the
- * newest item (`cursorAt`), relying on Trigger ID deduplication so repeated messages are no-ops. While the cursor stays
- * unchanged (including when clamped to the hourly horizon), sending the last page's ETag makes an unchanged list return
- * HTTP 304 and cost no rate limit. Items from before their kind was switched on or beyond the horizon are ignored.
+ * Starts watching the repository when one of its observation switches turns on, keeping a watch the account already had, and stops
+ * when they are all off, only a watch it started itself. A round makes at most `budget.left` such changes; the rest wait a round.
  */
-async function readStream(ctx: SourceContext, round: Round, id: string, path: string, config: GithubConfig): Promise<void> {
-  const name = KV.github.stream(id)
-  const stored = ctx.state.get(name)
-  const kinds = id === 'issues' ? [...config.observeIssues ? ['issues'] : [], ...config.observePulls ? ['pulls'] : []] : ['comments']
-  const before = typeof stored?.started === 'object' ? stored.started : {}
-  const started: Record<string, string> = Object.fromEntries(kinds.map(kind => [kind, before[kind] ?? round.started]))
-  const horizon = Math.floor((Date.parse(round.started) - POLL_HORIZON_MS) / 3_600_000) * 3_600_000
-  const since = new Date(Math.max(Date.parse(stored?.since ?? round.started), horizon)).toISOString()
-  const conditional = stored?.etag && stored.since === since ? ['-H', `If-None-Match: ${stored.etag}`] : []
-  let raw: string
-  const listed = `${path}&sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`
-  try { raw = await ctx.commands.withSignal(round.signal).api(listed, '--include', ...conditional) }
-  catch (error) {
-    if (error instanceof CliError && error.code === 304) return
+async function watchRepository(ctx: SourceContext, round: Round, config: GithubConfig, budget: WatchBudget): Promise<void> {
+  const wanted = config.observeIssues || config.observePulls || config.observeComments
+  const watching = ctx.state.get(KV.github.watching)
+  if (wanted === (watching !== undefined) || budget.left <= 0) return
+  budget.left -= 1
+  const commands = ctx.commands.withSignal(round.signal)
+  if (!wanted) {
+    if (watching?.by === 'agent') await commands.api(SUBSCRIPTION, '-X', 'DELETE')
+    ctx.state.set(KV.github.watching, undefined)
+    return
+  }
+  // GitHub answers 404 when the account does not watch the repository.
+  const current = await commands.api(SubscriptionSchema, SUBSCRIPTION).catch((error: unknown) => {
+    if (error instanceof CliError && error.code === 404) return undefined
     throw error
-  }
-  const { headers, body } = included(raw)
-  const items = validItems(ListedSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
-  const { login } = ctx.deployment.github
-  const fresh = (at: string | null | undefined, kind: string) =>
-    kind in started && Date.parse(at ?? '') >= Math.max(Date.parse(started[kind]!), horizon)
-  for (const item of items) {
-    // Stopping mid-stream aborts before advancing the cursor so unread items are retried.
-    if (stopped(ctx, round)) throw new Error('The GitHub Source stopped during the poll')
-    if (sameName(item.user.login, login)) continue
-    if (id === 'issues') {
-      const issue = IssueSchema.safeParse(item)
-      const pr = issue.success && !!issue.data.pull_request
-      if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
-      await ctx.receive(pr ? pullTrigger(issue.data, login, instanceId(ctx)) : issueTrigger(issue.data, login, instanceId(ctx)))
-      nameThread(ctx, issue.data.number, issue.data.title)
-      continue
-    }
-    const number = Number(/\/(?:issues|pulls)\/(\d+)$/.exec((id === 'comments' ? item.issue_url : item.pull_request_url) ?? '')?.[1])
-    if (!number || !fresh(item.updated_at ?? item.created_at, 'comments')) continue
-    const isPr = id === 'review-comments' || /\/pull\//.test(item.html_url ?? '')
-    const ref = { number, isPr, ...item.html_url ? { url: item.html_url } : {} }
-    const trigger = commentTrigger(item, ref, id === 'comments' ? 'conversation' : 'inline', login, instanceId(ctx))
-    if (trigger.text) await ctx.receive(trigger)
-  }
-  const newest = Math.max(...items.map(item => Date.parse(item.updated_at ?? '')).filter(Number.isFinite))
-  const moved = Number.isFinite(newest) ? cursorAt(new Date(newest).toISOString()) : since
-  const next = Date.parse(moved) > Date.parse(since) ? moved : since
-  const etag = /^etag:\s*(.+)$/im.exec(headers)?.[1]?.trim()
-  // The ETag belongs to this request, which the next round repeats only while the cursor stays unchanged.
-  ctx.state.set(name, { since: next, started, ...etag && next === since ? { etag } : {} })
+  })
+  if (current?.subscribed && !current.ignored) { ctx.state.set(KV.github.watching, { by: 'user' }); return }
+  await commands.api(SUBSCRIPTION, '-X', 'PUT', '-F', 'subscribed=true', '-F', 'ignored=false')
+  ctx.state.set(KV.github.watching, { by: 'agent' })
 }
 /** Polls default-branch CI checks, emitting a trigger only when the set of failing checks changes after the initial baseline. */
 async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
@@ -369,16 +346,18 @@ async function pollBranchCi(ctx: SourceContext, round: Round): Promise<void> {
   ctx.state.set(KV.github.branchCi, { branch, failures: now, revision })
 }
 /**
- * One polling round: notifications, then observed repository streams, then the PRs of open tickets with their CI, then
+ * One polling round: the repository's notifications from the account's inbox (`inbox`, read once for every instance, or read here
+ * when absent), then its watch and default-branch CI, then the PRs of open tickets with their CI, then
  * subscribed Threads. Each step and each Issue, PR, or Thread fails independently so all steps run before the round fails.
  * Other read failures (including 404) fail the round toward the error threshold, whereas deleted (410) or abandoned
  * (24h+) threads are recorded only on the thread and in health detail.
  * @returns the polling interval requested by GitHub, in seconds.
  */
-export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promise<number> {
+export async function pollRound(ctx: SourceContext, signal?: AbortSignal, inbox?: Promise<Inbox>,
+  budget: WatchBudget = { left: WATCH_CHANGES_PER_ROUND }): Promise<number> {
   const round = newRound(signal)
-  const notified = await pollNotifications(ctx, round).then(value => ({ value }), (error: unknown) => ({ error }))
-  await pollRepository(ctx, round)
+  const notified = await pollNotifications(ctx, round, inbox).then(value => ({ value }), (error: unknown) => ({ error }))
+  await pollRepository(ctx, round, budget)
   await pollTicketPulls(ctx, signal, round)
   await pollThreads(ctx, signal, round)
   if ('error' in notified) throw notified.error
@@ -392,16 +371,13 @@ export async function pollRound(ctx: SourceContext, signal?: AbortSignal): Promi
   ctx.report('github', { state: 'ready', detail: `${count} notifications; next poll ≥ ${interval}s${dropped}`, at: round.started })
   return interval
 }
-/** Reads notifications since the cursor and each Issue or PR they name, advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded. */
-async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ count: number; interval: number }> {
-  const { state } = ctx
-  const commands = ctx.commands.withSignal(round.signal)
-  const since = state.get(KV.github.since) ?? round.started
-  if (state.get(KV.github.since) === undefined) state.set(KV.github.since, since)
-  const { repository } = ctx.deployment
+/** The agent account's inbox as one round read it: the notifications updated since `since`, and the interval GitHub asked for. */
+export interface Inbox { since: string; notifications: z.infer<typeof NotificationSchema>[]; interval: number }
+/** Reads every notification of the agent account updated since `since`, less the listing lag, across all its repositories. */
+export async function readInbox(commands: Commands, since: string, tally?: Tally): Promise<Inbox> {
   const lagged = new Date(Date.parse(since) - NOTIFICATION_LAG_MS).toISOString()
-  const path = `notifications?all=true&per_page=50&since=${encodeURIComponent(lagged)}`
-  const raw = await commands.api(path, '--include')
+  const query = `all=true&per_page=50&since=${encodeURIComponent(lagged)}`
+  const raw = await commands.inbox(query, '--include')
   const split = raw.search(/\r?\n\r?\n/)
   if (split < 0) throw new Error('GitHub returned no HTTP headers')
   const headers = raw.slice(0, split)
@@ -409,13 +385,29 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
   const asked = Number(/x-poll-interval:\s*(\d+)/i.exec(headers)?.[1] ?? 60)
   const interval = Math.max(60, Number.isFinite(asked) ? asked : 60)
   const notifications = /rel="next"/.test(headers)
-    ? await commands.pages(NotificationSchema, path, round.tally)
-    : validItems(NotificationSchema, z.array(z.unknown()).parse(JSON.parse(body)), round.tally)
+    ? await commands.inboxPages(NotificationSchema, query, tally)
+    : validItems(NotificationSchema, z.array(z.unknown()).parse(JSON.parse(body)), tally)
+  return { since: lagged, notifications, interval }
+}
+/**
+ * Takes the repository's notifications from the inbox (read here when the round got none) and reads each Issue or PR they name,
+ * advancing the cursor atomically with the retry map for failed reads; deleted (410) Issues are dropped once their error is recorded.
+ */
+async function pollNotifications(ctx: SourceContext, round: Round, inbox?: Promise<Inbox>): Promise<{ count: number; interval: number }> {
+  const { state } = ctx
+  const since = state.get(KV.github.since) ?? round.started
+  if (state.get(KV.github.since) === undefined) state.set(KV.github.since, since)
+  const { repository } = ctx.deployment
+  const lagged = new Date(Date.parse(since) - NOTIFICATION_LAG_MS).toISOString()
+  const read = await (inbox ?? readInbox(ctx.commands.withSignal(round.signal), since, round.tally))
+  const { interval } = read
+  // A shared read lists from the earliest cursor of all instances: this repository's notifications older than its own are read already.
+  const notifications = read.notifications.filter(notification => sameName(notification.repository.full_name, repository)
+    && !(notification.updated_at && Date.parse(notification.updated_at) < Date.parse(lagged)))
   const retries = { ...state.get(KV.github.retries) }
   // Failed items from the previous round run first, followed by newly notified items in chronological order; each is read once.
   const items = new Map(Object.entries(retries).map(([number, retry]) => [Number(number), retry]))
-  for (const notification of notifications.reverse()) {
-    if (!sameName(notification.repository.full_name, repository)) continue
+  for (const notification of [...notifications].reverse()) {
     const address = githubAddress(notification.subject.url ?? '', repository)
     if (!address || address.discussion || items.has(address.number)) continue
     const { number, pr } = address
