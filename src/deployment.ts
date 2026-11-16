@@ -100,6 +100,8 @@ export function instanceOf(deployment: Pick<Deployment, 'repository' | 'reposito
 /** Every GitHub instance ID with its repository, the default instance first. */
 export const githubInstances = (deployment: Pick<Deployment, 'repository' | 'repositories'>): [id: string, repository: string][] =>
   [['github', deployment.repository], ...Object.entries(deployment.repositories ?? {})]
+/** How many repositories setup checks at once. */
+const ACCESS_CHECKS = 8
 /** Checks the agent account's push access to one repository and returns its canonical name. */
 async function repositoryAccess(cli: string, login: string, remote: string, probe: Probe): Promise<string> {
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
@@ -109,6 +111,35 @@ async function repositoryAccess(cli: string, login: string, remote: string, prob
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: login, repository: access.name })
   return access.name
+}
+/** A repository pattern such as `owner/**`, `owner/*` or `owner/hx-*`: an owner and a name glob in which `*` matches any characters. */
+export const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]*\*[A-Za-z0-9_.*-]*$/
+export const isRepositoryPattern = (text: string): boolean => REPOSITORY_PATTERN.test(text.trim())
+/** Whether `repository` (owner/name) matches `pattern`, case-insensitively; `**` and `*` both match any part of the name. */
+export function matchesPattern(pattern: string, repository: string): boolean {
+  const [owner, glob = ''] = pattern.trim().split('/')
+  const [name, repo = ''] = repository.split('/')
+  if (!owner || owner.toLowerCase() !== name?.toLowerCase()) return false
+  const source = glob.split(/\*+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+  return new RegExp(`^${source}$`, 'i').test(repo)
+}
+const ListedRepository = z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), push: z.boolean().nullable(),
+  fork: z.boolean().nullable().default(false), archived: z.boolean().nullable().default(false) })
+/**
+ * The repositories the agent account can push to that match `pattern`, in name order: every repository it owns or collaborates on,
+ * itself or through an organization. Forks and archived repositories are left out, since nothing happens in them to receive.
+ */
+export async function expandRepositoryPattern(cli: string, pattern: string, probe: Probe): Promise<string[]> {
+  const output = await probe([cli, 'api', '--paginate', 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member',
+    '--jq', '.[] | {name: .full_name, push: .permissions.push, fork: .fork, archived: .archived}'])
+  const names = new Map<string, string>()
+  for (const line of output.split('\n')) {
+    if (!line.trim()) continue
+    const repository = parsed(ListedRepository, line)
+    if (!repository || repository.push !== true || repository.fork || repository.archived) continue
+    if (matchesPattern(pattern, repository.name)) names.set(repository.name.toLowerCase(), repository.name)
+  }
+  return [...names.values()].sort((a, b) => a.localeCompare(b))
 }
 /**
  * Verify the agent's GitHub CLI identity and push access to the configured repository, and to the repository of each extra GitHub
@@ -130,10 +161,19 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const repository = await repositoryAccess(cli, agent.login, remote, probe)
   const repositories: Record<string, string> = {}, repositoryProblems: Record<string, string> = {}
   const taken = new Set([repository.toLowerCase()])
-  for (const extra of extras) {
+  // Checked a few at a time, so a table of dozens of repositories saves in seconds; the results are then taken in table order.
+  const checks: Promise<string>[] = []
+  for (let start = 0; start < extras.length; start += ACCESS_CHECKS) {
+    const batch = extras.slice(start, start + ACCESS_CHECKS)
+      .map(extra => extra.repository ? repositoryAccess(cli, agent.login, extra.repository, probe) : Promise.resolve(''))
+    for (const check of batch) check.catch(() => { /* read below, in table order */ })
+    await Promise.allSettled(batch)
+    checks.push(...batch)
+  }
+  for (const [index, extra] of extras.entries()) {
     if (!extra.repository) { repositoryProblems[extra.id] = 'The instance names no repository.'; continue }
     try {
-      const name = await repositoryAccess(cli, agent.login, extra.repository, probe)
+      const name = await checks[index]!
       if (taken.has(name.toLowerCase())) { repositoryProblems[extra.id] = `${name} is already another GitHub instance's repository.`; continue }
       taken.add(name.toLowerCase())
       repositories[extra.id] = name

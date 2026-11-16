@@ -7,18 +7,25 @@ import { Hint } from './widgets.tsx'
 import { Button, Field, Icon, Input, Switch, Select, Textarea } from './ui/index.ts'
 
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+/** A pattern such as `owner/**`: saving adds every repository of that owner the agent account can push to. */
+const PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]*\*[A-Za-z0-9_.*-]*$/
+const ENTRY = new RegExp(`(?:${REPOSITORY.source.slice(1, -1)})|(?:${PATTERN.source.slice(1, -1)})`)
+const readable = (name: string) => REPOSITORY.test(name) || PATTERN.test(name)
+/** What every repository of the table receives besides what addresses the agent, set once for all of them. */
+export const OBSERVED = ['observeIssues', 'observePulls', 'observeComments'] as const
+export type Observed = typeof OBSERVED[number]
 /** A row of the table: `id` names an existing instance, and a row without one becomes a new instance when saved. */
-export interface RepositoryRow { id?: string; repository: string; enabled: boolean }
+export interface RepositoryRow { id?: string; repository: string; enabled: boolean; observe?: Partial<Record<Observed, boolean>> }
 /**
- * Reads pasted repositories: one per line, or separated by spaces or commas, written owner/name or as a github.com page (the
- * repository, an Issue or a PR in it). Returns the repositories in order, without repeats, and the entries it could not read.
+ * Reads pasted repositories: one per line, or separated by spaces or commas, written owner/name, as a pattern such as owner/** (every
+ * repository of the owner the agent account can push to, expanded when saved), or as a github.com page (the repository, an Issue or a PR in it). Returns the repositories in order, without repeats, and the entries it could not read.
  */
 export function parseRepositories(text: string): { repositories: string[]; invalid: string[] } {
   const repositories: string[] = [], invalid: string[] = []
   for (const entry of text.split(/[\s,]+/).map(item => item.trim()).filter(Boolean)) {
     const page = /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#].*)?$/i.exec(entry)?.[1]
     const name = page ?? entry.replace(/\.git$/, '')
-    if (!REPOSITORY.test(name)) { invalid.push(entry); continue }
+    if (!readable(name)) { invalid.push(entry); continue }
     if (!repositories.some(item => item.toLowerCase() === name.toLowerCase())) repositories.push(name)
   }
   return { repositories, invalid }
@@ -52,7 +59,8 @@ export function RepositoryTable() {
   const { settings, reload } = useSettings()
   const primary = settings.sources.find(source => source.id === 'github' && !source.extra)
   const saved = useMemo<RepositoryRow[]>(() => settings.sources.filter(source => source.kind === 'github' && source.extra)
-    .map(source => ({ id: source.id, repository: String(source.value.config.repository ?? ''), enabled: source.value.enabled })),
+    .map(source => ({ id: source.id, repository: String(source.value.config.repository ?? ''), enabled: source.value.enabled,
+      observe: Object.fromEntries(OBSERVED.map(key => [key, source.value.config[key] === true])) })),
   [settings.sources])
   const block = settings.instances.github
   const [bulk, setBulk] = useState('')
@@ -62,8 +70,9 @@ export function RepositoryTable() {
     revision: block?.revision, reload, save: async (rows, revision) => {
       const policyFrom = template || undefined
       // An existing instance keeps its own switches and gateway, which its card edits; the table changes its repository list only.
+      // The table's switches for what every repository receives apply to each row; a new row receives all three unless switched off.
       const configOf = (row: RepositoryRow) => ({ ...settings.sources.find(source => source.id === row.id)?.value.config ?? {},
-        repository: row.repository.trim() })
+        ...Object.fromEntries(OBSERVED.map(key => [key, row.observe?.[key] ?? true])), repository: row.repository.trim() })
       const result = await call('PUT sources/:kind/instances', { kind: 'github', body: { revision, rows: rows.map(row => ({
         ...isNew(row) ? {} : { id: row.id }, enabled: row.enabled, config: configOf(row),
         ...isNew(row) && policyFrom ? { policyFrom } : {} })) } })
@@ -75,18 +84,22 @@ export function RepositoryTable() {
   const busy = draft.busy
   const primaryRepository = String(primary.value.config.repository ?? '')
   const repeated = repeatedRepositories(current, primaryRepository)
-  const malformed = current.filter(row => !REPOSITORY.test(row.repository.trim())).map(row => row.repository || '—')
+  const malformed = current.filter(row => !readable(row.repository.trim())).map(row => row.repository || '—')
+  // A switch is on when every repository of the table has it on; switching it sets it on every one.
+  const observing = (key: Observed) => current.length > 0 && current.every(row => row.observe?.[key] ?? true)
+  const observeAll = (key: Observed, on: boolean) => edit(current.map(row => ({ ...row, observe: { ...row.observe, [key]: on } })))
   const full = current.length + 1 >= block.max
   const edit = (next: RepositoryRow[]) => { draft.edit(next); setInvalid(undefined) }
   const add = () => {
-    const row = { id: freshId(), repository: '', enabled: true }
+    const row: RepositoryRow = { id: freshId(), repository: '', enabled: true, observe: Object.fromEntries(OBSERVED.map(key => [key, true])) }
     edit([...current, row])
     requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[data-repository-row="${row.id}"] input`)?.focus())
   }
   const addBulk = () => {
     const { repositories, invalid: unread } = parseRepositories(bulk)
     const known = new Set([primaryRepository, ...current.map(row => row.repository)].map(name => name.trim().toLowerCase()))
-    const added = repositories.filter(name => !known.has(name.toLowerCase())).map(repository => ({ id: freshId(), repository, enabled: true }))
+    const added = repositories.filter(name => !known.has(name.toLowerCase())).map(repository => ({ id: freshId(), repository, enabled: true,
+      observe: Object.fromEntries(OBSERVED.map(key => [key, true])) }))
     edit([...current, ...added].slice(0, block.max - 1))
     setBulk('')
     if (unread.length) setInvalid(unread)
@@ -106,8 +119,8 @@ export function RepositoryTable() {
       <li className="dt-rows-item"><span className="dt-row-label dt-mono">{primaryRepository || '—'}</span>
         <span className="dt-hint">{t('repositoriesDefault')}</span></li>
       {current.map((row, index) => <li key={row.id ?? `row-${index}`} className="dt-rows-item" data-repository-row={row.id}>
-        <Input className="dt-mono" aria-label={t('repositoriesRepository')} placeholder="owner/name" spellCheck={false} required
-          pattern={REPOSITORY.source.slice(1, -1)} value={row.repository} disabled={busy || !isNew(row)}
+        <Input className="dt-mono" aria-label={t('repositoriesRepository')} placeholder="owner/name · owner/**" spellCheck={false} required
+          pattern={ENTRY.source} value={row.repository} disabled={busy || !isNew(row)}
           onChange={event => edit(current.map((item, position) => position === index ? { ...item, repository: event.target.value } : item))} />
         <Switch checked={row.enabled} label={t('repositoriesEnabled', { name: row.repository || '—' })}
           onChange={enabled => edit(current.map((item, position) => position === index ? { ...item, enabled } : item))} />
@@ -116,6 +129,12 @@ export function RepositoryTable() {
           onClick={() => edit(current.filter((_, position) => position !== index))} />
       </li>)}
     </ul>
+    <Field className="dt-field" label={t('repositoriesObserve')}>
+      <div className="dt-row-buttons">
+        {OBSERVED.map(key => <Switch key={key} checked={observing(key)} disabled={busy || !current.length}
+          label={t(`repositoriesObserve.${key}`)} onChange={on => observeAll(key, on)} />)}
+      </div>
+    </Field>
     <Field className="dt-field" label={t('repositoriesBulk')}>
       <Textarea className="dt-mono" rows={3} autoGrow={false} spellCheck={false} placeholder={t('repositoriesBulkHint')}
         value={bulk} disabled={busy} onChange={event => setBulk(event.target.value)} />
