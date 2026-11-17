@@ -2,7 +2,8 @@
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
-import { AdmissionTableSchema, type Settings } from '../policy.ts'
+import { AdmissionTableSchema, policyPartOf, type Settings } from '../policy.ts'
+import { patternRowOf } from '../infra/repository-pattern.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
 
 /** The number of an extra instance ID such as `github-2`, ordering instances by creation. */
@@ -18,8 +19,22 @@ export class SourceRegistry implements SourceScope {
   private readonly health = new Map<string, HealthEntry>()
   /** Health entries claimed for extra instances, by kind, released with the kind's registration. */
   private readonly extraHealth = new Map<string, Set<string>>()
+  /**
+   * @param members - the repositories pattern rows cover right now, by the IDs of the instances they materialize (`memberId`). Such an
+   * instance is not stored: its kind, switches and Policy part are its row's, and its label is its repository.
+   */
   constructor(private readonly settings: () => Settings, private readonly board: Pick<HealthBoard, 'claim'> = new HealthBoard(),
-    private readonly registered: (kind: SourceKind) => () => void = () => () => {}) {}
+    private readonly registered: (kind: SourceKind) => () => void = () => () => {},
+    private readonly members: () => Record<string, string> = () => ({})) {}
+  /** The stored instance `id`, or for an instance a pattern row materialized, its row with the repository it covers. */
+  private stored(id: string, settings: Settings): Settings['sources'][string] | undefined {
+    const own = settings.sources[id]
+    const row = own ? undefined : patternRowOf(id)
+    const stored = row === undefined ? undefined : settings.sources[row]
+    if (!stored) return own
+    const repository = this.members()[id]
+    return repository === undefined ? stored : { ...stored, config: { ...stored.config, repository } }
+  }
 
   /** Registers a SourceKind, claims its health entries on HealthBoard (rejecting `sync:` prefixes owned by Settings), and returns an unregister disposer. */
   register<C extends Record<string, unknown>>(kind: SourceKind<C>): () => void {
@@ -54,7 +69,7 @@ export class SourceRegistry implements SourceScope {
   kind(id: string, settings = this.settings()): SourceKind | undefined {
     const own = this.kinds.get(id)
     if (own) return own
-    const stored = settings.sources[id]?.kind
+    const stored = this.stored(id, settings)?.kind
     const kind = stored === undefined ? undefined : this.kinds.get(stored)
     return kind?.multiple ? kind : undefined
   }
@@ -79,7 +94,7 @@ export class SourceRegistry implements SourceScope {
   }
   instance<C extends Record<string, unknown>>(id: string, settings = this.settings()): SourceInstance<C> | undefined {
     const kind = this.kind(id, settings)
-    return kind ? this.resolve(kind, settings.sources[id], id) as SourceInstance<C> : undefined
+    return kind ? this.resolve(kind, this.stored(id, settings), id) as SourceInstance<C> : undefined
   }
   validate(id: string, value: { enabled: boolean; config: unknown }): { enabled: boolean; config: Record<string, unknown>; kind?: string } {
     const kind = this.kind(id)
@@ -93,15 +108,19 @@ export class SourceRegistry implements SourceScope {
   title(id: string, settings = this.settings()): { zh: string; en: string } {
     const kind = this.kind(id, settings)
     if (!kind) return { zh: id, en: id }
-    const instance = this.resolve(kind, settings.sources[id], id)
+    const instance = this.resolve(kind, this.stored(id, settings), id)
     const label = kind.multiple && instance.config ? kind.multiple.label(instance.config) : ''
     return label ? { zh: `${kind.title.zh} · ${label}`, en: `${kind.title.en} · ${label}` } : kind.title
   }
-  /** Health entry names of instance `id`: the kind's own for the default instance, `<entry>@<id>` for an extra instance. */
+  /**
+   * Health entry names of instance `id`: the kind's own for the default instance, `<entry>@<id>` for an extra instance, and its row's
+   * for an instance a pattern row materialized, which reports under its row.
+   */
   healthNames(id: string, settings = this.settings()): string[] {
     const kind = this.kind(id, settings)
     if (!kind) return []
-    return id === kind.kind ? [...kind.health] : kind.health.map(name => `${name}@${id}`)
+    const owner = settings.sources[id] ? id : patternRowOf(id) ?? id
+    return owner === kind.kind ? [...kind.health] : kind.health.map(name => `${name}@${owner}`)
   }
   /**
    * Claims (once) and returns the health entries of extra instance `id`; the default instance's entries were claimed with its kind.
@@ -131,14 +150,14 @@ export class SourceRegistry implements SourceScope {
   policyPart(id: string, settings = this.settings()) {
     const policy = this.kind(id, settings)?.policy
     if (!policy) return undefined
-    const { admission, ...rest } = settings.policy.sources[id] ?? {}
+    const { admission, ...rest } = policyPartOf(settings, id) ?? {}
     const parsed = policy.schema.safeParse(rest)
     return { ...parsed.success ? parsed.data : policy.schema.parse({}), admission: AdmissionTableSchema.safeParse(admission ?? {}).data ?? {} }
   }
   channelAllowed(channel: { source: string; address: Record<string, string> }, settings = this.settings()): boolean {
     const kind = this.kind(channel.source, settings)
     if (!kind) return false
-    const instance = this.resolve(kind, settings.sources[channel.source], channel.source)
+    const instance = this.resolve(kind, this.stored(channel.source, settings), channel.source)
     return instance.enabled && (kind.channel?.allowed?.(channel.address, instance.config) ?? true)
   }
   /** Environment variable declarations for every installed kind, whether enabled or disabled. */
@@ -168,7 +187,7 @@ export class SourceRegistry implements SourceScope {
   /** A multi-instance kind's Thread keys name its default instance (`github:12`) and stand for the same key on each of its instances. */
   find(query: string): { threads: string[]; terms: string[] } {
     const expand = (kind: SourceKind, keys: string[]) => !kind.multiple ? keys : keys.flatMap(key => key.startsWith(`${kind.kind}:`)
-      ? this.instancesOf(kind.kind).map(id => `${id}${key.slice(kind.kind.length)}`) : [key])
+      ? [...this.instancesOf(kind.kind), ...Object.keys(this.members())].map(id => `${id}${key.slice(kind.kind.length)}`) : [key])
     const found = [...this.kinds.values()].flatMap(kind => kind.find ? [(found => ({ ...found, threads: expand(kind, found.threads) }))(kind.find(query))] : [])
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
   }
@@ -177,7 +196,7 @@ export class SourceRegistry implements SourceScope {
     const kind = this.kind(trigger.source, settings)
     const context = kind?.threadContext
     if (!kind || !context) return undefined
-    const { config } = this.resolve(kind, settings.sources[trigger.source], trigger.source)
+    const { config } = this.resolve(kind, this.stored(trigger.source, settings), trigger.source)
     return {
       messageId: context.messageId(trigger),
       read: (commands, part, cursor) => context.read(commands, trigger, part, cursor, config),
@@ -190,7 +209,7 @@ export class SourceRegistry implements SourceScope {
   }
   scope(input: { source: string; meta: Record<string, unknown> }, settings = this.settings()): ScopeResult {
     const kind = this.kind(input.source, settings)
-    const stored = settings.sources[input.source]
+    const stored = this.stored(input.source, settings)
     // Without its kind plugin the stored scope cannot be evaluated, so a configured Source whose plugin is missing listens to nothing.
     if (!kind) return stored ? { listened: false, reason: 'source_not_installed' } : { listened: true, observed: false }
     const instance = this.resolve(kind, stored, input.source)

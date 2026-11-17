@@ -48,7 +48,7 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
   An upgrade that changes an overridden default marks it **Default updated** (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
 - **Deployment:** startup problems with **Check again**, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.
 
-The GitHub repository table is a settings block like the others: its edits are a draft kept in the tab, saved with the shared save bar, merged with a concurrent save, and a save applies the repositories in place without restarting dsh-superagent. A row may be a pattern such as `owner/**`, which the save expands; the table's switches set what every repository receives.
+The GitHub repository table is a settings block like the others: its edits are a draft kept in the tab, saved with the shared save bar, merged with a concurrent save, and a save applies the repositories in place without restarting dsh-superagent. A row may be a pattern such as `owner/**`, which stays one row and is matched live, so repositories created later join on their next mention or within 30 minutes; the table's switches set what every repository receives.
 
 ## Live updates
 

@@ -14,7 +14,7 @@ import type { Sessions } from './sessions.ts'
 import { accountsChanged, extrasChanged, setupChanged, type Setup } from './setup.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
-import { isRepositoryPattern } from '../deployment.ts'
+import { patternRowOf } from '../infra/repository-pattern.ts'
 
 /**
  * Indicates an optimistic concurrency conflict when saving or syncing a settings block against a stale revision.
@@ -93,7 +93,10 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source' | 'instances', Bl
     guard: (current, candidate, origin) => { if (origin !== 'panel' && setupChanged(current, candidate)) throw new UserError('panelOnlyAccounts') },
   },
 }
-/** What a GitHub repository added to the table receives besides what addresses the agent: its new Issues, new PRs and comments. */
+/**
+ * What a GitHub repository or pattern row added to the table receives besides what addresses the agent: its new Issues, new PRs and
+ * comments.
+ */
 const NEW_REPOSITORY = { observeIssues: true, observePulls: true, observeComments: true } as const
 const InstancesValue = z.object({
   instances: z.record(z.string(), z.object({ enabled: z.boolean(), config: z.record(z.string(), z.unknown()) })),
@@ -122,7 +125,7 @@ export interface SettingsHost {
   /** Source host passed to source kinds' policy syncs and label refreshes. */
   readonly sourceHost: SourceHost
   /** Setup state, account/command checks, and restart trigger when setup-read fields change. */
-  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart' | 'refreshRepositories' | 'expandRepositories'>
+  readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart' | 'refreshRepositories'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
 }
@@ -289,7 +292,8 @@ export class Settings {
    * the `instances:<kind>` block against its `revision`. A row naming an existing instance keeps it (its Threads, cursors and policy
    * part); a row without an ID adds `<kind>-<n>` under a number never issued before; an instance missing from `rows` is removed.
    * The account fields the kind shares (`multiple.shared`) stay on the default instance. A new row may start from another
-   * instance's policy part (`policyFrom`). Changing the set of repositories re-runs setup like any account change.
+   * instance's policy part (`policyFrom`). A row whose repository is a pattern such as `owner/**` stays one instance: the GitHub
+   * Source matches it live against the account's repositories. Changing the set of repositories re-runs setup like any account change.
    * @throws UserError when `kind` has one instance, a row is invalid or repeats another instance's label, the rows exceed the kind's
    * maximum, a removed instance still has open tickets, or (via setup) the agent account cannot push to an added repository.
    */
@@ -300,7 +304,7 @@ export class Settings {
     if (!owner || owner.kind !== kind || !multiple) throw new UserError('notMultiple', { source: kind })
     const current = store.settings()
     const existing = sources.instancesOf(kind, current).filter(id => id !== kind)
-    const parsed = kind === 'github' ? await this.expandPatterns(z.array(InstanceRow).parse(rows), current) : z.array(InstanceRow).parse(rows)
+    const parsed = z.array(InstanceRow).parse(rows)
     if (multiple.max !== undefined && parsed.length + 1 > multiple.max) throw new UserError('instancesTooMany', { max: String(multiple.max), source: kind })
     let number = Math.max(store.get(KV.settings.instanceNumber(kind)) ?? 1,
       ...existing.map(id => Number(/-(\d+)$/.exec(id)?.[1] ?? 0)))
@@ -328,8 +332,10 @@ export class Settings {
     }
     const removed = existing.filter(id => !(id in instances))
     for (const id of removed) {
-      const open = store.tickets.open().filter(ticket => (ticket.follows ?? []).some(follow => follow.thread.startsWith(`${id}:`))
-        || ticket.channels.some(channel => channel.source === id) || store.triggers.get(ticket.origin.triggerId)?.source === id)
+      // A pattern row's tickets are those of the repositories it covers, whose instances' IDs are derived from its own.
+      const of = (source: string | undefined) => source !== undefined && (source === id || patternRowOf(source) === id)
+      const open = store.tickets.open().filter(ticket => (ticket.follows ?? []).some(follow => of(follow.thread.slice(0, follow.thread.indexOf(':'))))
+        || ticket.channels.some(channel => of(channel.source)) || of(store.triggers.get(ticket.origin.triggerId)?.source))
       const instance = sources.instance(id, current)
       if (open.length) {
         throw new UserError('instanceInUse', { id, label: instance ? multiple.label(instance.config) : id, tickets: open.map(ticket => ticket.title).join(', ') })
@@ -338,30 +344,6 @@ export class Settings {
     const result = await this.save(`instances:${kind}`, { instances, policy }, revision, origin)
     if (result.saved) store.set(KV.settings.instanceNumber(kind), number)
     return { ...result, instances: this.instanceRows(kind) }
-  }
-  /**
-   * Replaces each GitHub row whose repository is a pattern (such as `owner/**`) with one row per repository the agent account can
-   * push to that matches it, leaving out the default repository and those other rows already list. Each such row takes the
-   * pattern row's switches and `policyFrom` (the default instance's when it names none).
-   */
-  private async expandPatterns(rows: z.infer<typeof InstanceRow>[], settings: SettingsValue): Promise<z.infer<typeof InstanceRow>[]> {
-    const repositoryOf = (row: { config: Record<string, unknown> }) => typeof row.config.repository === 'string' ? row.config.repository.trim() : ''
-    if (!rows.some(row => isRepositoryPattern(repositoryOf(row)))) return rows
-    const primary = settings.sources.github?.config.repository
-    const taken = new Set([...typeof primary === 'string' ? [primary.toLowerCase()] : [],
-      ...rows.map(repositoryOf).filter(name => !isRepositoryPattern(name)).map(name => name.toLowerCase())])
-    const expanded: z.infer<typeof InstanceRow>[] = []
-    for (const row of rows) {
-      const pattern = repositoryOf(row)
-      if (!isRepositoryPattern(pattern)) { expanded.push(row); continue }
-      const { id: _id, ...rest } = row
-      for (const repository of await this.host.setup.expandRepositories(pattern)) {
-        if (taken.has(repository.toLowerCase())) continue
-        taken.add(repository.toLowerCase())
-        expanded.push({ ...rest, config: { ...row.config, repository }, policyFrom: row.policyFrom ?? 'github' })
-      }
-    }
-    return expanded
   }
   /** Returns the IDs of installed, enabled Sources whose policy section can synchronize now (empty while setup is not configured). */
   syncable(): string[] {

@@ -8,6 +8,8 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import { ACCOUNT_REPOSITORIES } from './infra/commands.ts'
+import { isRepositoryPattern, patternOwner, patternRowOf } from './infra/repository-pattern.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
@@ -43,7 +45,8 @@ export function machineOf(config: DeploymentConfig): Machine {
 }
 
 export const GithubAccountsSchema = z.object({
-  repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
+  /** owner/name, or on an extra instance a pattern such as owner/** (`isRepositoryPattern`). */
+  repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]+)?$/, 'owner/name or owner/**').default(''),
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
@@ -55,6 +58,11 @@ export interface Deployment extends Machine {
   repository: string
   /** Canonical repository of each extra GitHub instance (such as `github-2`) whose push access setup verified. */
   repositories?: Record<string, string>
+  /**
+   * The pattern of each extra GitHub instance whose repository is a pattern (such as `owner/**`), by instance ID. Such a row is
+   * one instance in the settings; the repositories it covers right now are in `repositories` under their own IDs (`memberId`).
+   */
+  patterns?: Record<string, string>
   /** Why setup left an extra GitHub instance out, by instance ID; the other instances run. */
   repositoryProblems?: Record<string, string>
   github: { cli: string; login: string; noreply: string }
@@ -100,6 +108,28 @@ export function instanceOf(deployment: Pick<Deployment, 'repository' | 'reposito
 /** Every GitHub instance ID with its repository, the default instance first. */
 export const githubInstances = (deployment: Pick<Deployment, 'repository' | 'repositories'>): [id: string, repository: string][] =>
   [['github', deployment.repository], ...Object.entries(deployment.repositories ?? {})]
+/** The repositories pattern rows cover right now, by their instances' IDs (`memberId`). */
+export const patternMembers = (deployment: Pick<Deployment, 'repositories'>): Record<string, string> =>
+  Object.fromEntries(Object.entries(deployment.repositories ?? {}).filter(([id]) => patternRowOf(id) !== undefined))
+/**
+ * `deployment` with the repositories each pattern row covers (`members`, by row ID) among its repositories. A repository the default
+ * instance or an explicit row names stays theirs, one an earlier row already covers stays that row's, and a row setup did not verify
+ * as a pattern covers nothing.
+ */
+export function withMembers(deployment: Deployment, members: ReadonlyMap<string, Record<string, string>>): Deployment {
+  if (!members.size) return deployment
+  const explicit = Object.fromEntries(Object.entries(deployment.repositories ?? {}).filter(([id]) => patternRowOf(id) === undefined))
+  const taken = new Set([deployment.repository, ...Object.values(explicit)].map(name => name.toLowerCase()))
+  const covered: Record<string, string> = {}
+  for (const row of Object.keys(deployment.patterns ?? {})) {
+    for (const [id, repository] of Object.entries(members.get(row) ?? {})) {
+      if (patternRowOf(id) !== row || taken.has(repository.toLowerCase())) continue
+      taken.add(repository.toLowerCase())
+      covered[id] = repository
+    }
+  }
+  return { ...deployment, repositories: { ...explicit, ...covered } }
+}
 /** How many repositories setup checks at once. */
 const ACCESS_CHECKS = 8
 /** Checks the agent account's push access to one repository and returns its canonical name. */
@@ -112,34 +142,21 @@ async function repositoryAccess(cli: string, login: string, remote: string, prob
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: login, repository: access.name })
   return access.name
 }
-/** A repository pattern such as `owner/**`, `owner/*` or `owner/hx-*`: an owner and a name glob in which `*` matches any characters. */
-export const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]*\*[A-Za-z0-9_.*-]*$/
-export const isRepositoryPattern = (text: string): boolean => REPOSITORY_PATTERN.test(text.trim())
-/** Whether `repository` (owner/name) matches `pattern`, case-insensitively; `**` and `*` both match any part of the name. */
-export function matchesPattern(pattern: string, repository: string): boolean {
-  const [owner, glob = ''] = pattern.trim().split('/')
-  const [name, repo = ''] = repository.split('/')
-  if (!owner || owner.toLowerCase() !== name?.toLowerCase()) return false
-  const source = glob.split(/\*+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
-  return new RegExp(`^${source}$`, 'i').test(repo)
-}
+export { isRepositoryPattern, matchesPattern, REPOSITORY_PATTERN } from './infra/repository-pattern.ts'
 const ListedRepository = z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), push: z.boolean().nullable(),
   fork: z.boolean().nullable().default(false), archived: z.boolean().nullable().default(false) })
-/**
- * The repositories the agent account can push to that match `pattern`, in name order: every repository it owns or collaborates on,
- * itself or through an organization. Forks and archived repositories are left out, since nothing happens in them to receive.
- */
-export async function expandRepositoryPattern(cli: string, pattern: string, probe: Probe): Promise<string[]> {
-  const names = new Map<string, string>()
-  for (const repository of (await reachableRepositories(cli, probe)).values()) {
-    if (repository.push !== true || repository.fork || repository.archived) continue
-    if (matchesPattern(pattern, repository.name)) names.set(repository.name.toLowerCase(), repository.name)
-  }
-  return [...names.values()].sort((a, b) => a.localeCompare(b))
+/** Checks that the owner a repository pattern covers exists for the agent account; the repositories it covers are found at runtime. */
+async function patternAccess(cli: string, pattern: string, probe: Probe): Promise<string> {
+  const owner = patternOwner(pattern)
+  const login = (await probe([cli, 'api', `users/${owner}`, '--jq', '.login']).catch((error: unknown) => {
+    throw new SetupError('patternOwnerUnreadable', { owner, output: reason(error) })
+  })).trim()
+  if (!login) throw new SetupError('patternOwnerUnreadable', { owner, output: '' })
+  return `${login}/${pattern.trim().split('/')[1] ?? ''}`
 }
 /** Every repository the agent account owns or collaborates on, itself or through an organization, by lowercased name: 100 a read. */
 async function reachableRepositories(cli: string, probe: Probe): Promise<Map<string, z.infer<typeof ListedRepository>>> {
-  const output = await probe([cli, 'api', '--paginate', 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member',
+  const output = await probe([cli, 'api', '--paginate', ACCOUNT_REPOSITORIES,
     '--jq', '.[] | {name: .full_name, push: .permissions.push, fork: .fork, archived: .archived}'])
   const repositories = new Map<string, z.infer<typeof ListedRepository>>()
   for (const line of output.split('\n')) {
@@ -159,6 +176,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
   if (!remote) throw new SetupError('repositoryUnset')
+  if (isRepositoryPattern(remote)) throw new SetupError('repositoryPatternDefault', { repository: remote })
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
@@ -166,7 +184,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
   const repository = await repositoryAccess(cli, agent.login, remote, probe)
-  const repositories: Record<string, string> = {}, repositoryProblems: Record<string, string> = {}
+  const repositories: Record<string, string> = {}, repositoryProblems: Record<string, string> = {}, patterns: Record<string, string> = {}
   const taken = new Set([repository.toLowerCase()])
   // A long table is checked against one listing of the account's repositories, 100 a read, instead of one read each; a repository
   // the listing leaves out (renamed or transferred, say) is read alone. Those are read a few at a time, then taken in table order.
@@ -180,7 +198,8 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const checks: Promise<string>[] = []
   for (let start = 0; start < extras.length; start += ACCESS_CHECKS) {
     const batch = extras.slice(start, start + ACCESS_CHECKS)
-      .map(extra => extra.repository ? access(extra.repository) : Promise.resolve(''))
+      .map(extra => !extra.repository ? Promise.resolve('') : isRepositoryPattern(extra.repository)
+        ? patternAccess(cli, extra.repository, probe) : access(extra.repository))
     for (const check of batch) check.catch(() => { /* read below, in table order */ })
     await Promise.allSettled(batch)
     checks.push(...batch)
@@ -189,6 +208,12 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
     if (!extra.repository) { repositoryProblems[extra.id] = 'The instance names no repository.'; continue }
     try {
       const name = await checks[index]!
+      if (isRepositoryPattern(name)) {
+        if (taken.has(name.toLowerCase())) { repositoryProblems[extra.id] = `${name} is already another GitHub instance's pattern.`; continue }
+        taken.add(name.toLowerCase())
+        patterns[extra.id] = name
+        continue
+      }
       if (taken.has(name.toLowerCase())) { repositoryProblems[extra.id] = `${name} is already another GitHub instance's repository.`; continue }
       taken.add(name.toLowerCase())
       repositories[extra.id] = name
@@ -198,6 +223,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
     }
   }
   return { ...machine, repository, ...extras.length ? { repositories, repositoryProblems } : {},
+    ...Object.keys(patterns).length ? { patterns } : {},
     github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
 }
 

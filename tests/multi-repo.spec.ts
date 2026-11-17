@@ -6,7 +6,9 @@ import { join } from 'node:path'
 import { Engine, type Assessor, type Executor, type Ticket, type Trigger } from '../src/core/index.ts'
 import { SettingsSchema, allowedSender, settingsPolicy } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { githubKind, githubKindWith, instanceContext, pollRound, readInbox } from '../src/sources/github.ts'
+import { githubKind, githubKindWith, instanceContext, instanceContexts, pollRound, readInbox, watch } from '../src/sources/github.ts'
+import { LISTING_INTERVAL_MS, RepositoryPatterns } from '../src/sources/github-patterns.ts'
+import { memberId, patternRowOf } from '../src/infra/repository-pattern.ts'
 import { issueTrigger } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, type Pull } from '../src/sources/github-pull.ts'
 import { readGithub } from '../src/sources/github-read.ts'
@@ -14,7 +16,7 @@ import { Store } from '../src/app/store.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
-import { githubInstances, instanceOf, matchesPattern, repositoryOf, type Deployment } from '../src/deployment.ts'
+import { githubInstances, instanceOf, matchesPattern, patternMembers, repositoryOf, withMembers, type Deployment } from '../src/deployment.ts'
 import { Setup } from '../src/app/setup.ts'
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
@@ -287,24 +289,169 @@ describe('repository patterns', () => {
     expect(matchesPattern('acme/hx-*', 'acme/ui')).toBe(false)
     expect(matchesPattern('acme/**', 'other/tools')).toBe(false)
     expect(parseRepositories('HengXin666/** acme/a').repositories).toEqual(['HengXin666/**', 'acme/a'])
+    // A covered repository's instance ID is the same for every spelling of its name, fits the Source ID format, and names its row.
+    expect(memberId('github-4', 'acme/Tools')).toBe(memberId('github-4', 'ACME/tools'))
+    expect(memberId('github-4', 'acme/tools')).toMatch(/^[a-z][a-z0-9-]*$/)
+    expect(patternRowOf(memberId('github-4', 'acme/tools'))).toBe('github-4')
+    expect(patternRowOf('github-4')).toBeUndefined()
   })
-  it('expands owner/** into every pushable repository of the owner, without forks, archives or the default one, and without a restart', async () => {
+  it('keeps a pattern row one row when saved, checks only its owner, and applies it without a restart', async () => {
     h = await startRuntime()
     const restart = vi.spyOn(Setup.prototype, 'restart').mockImplementation(() => {})
     const { settings, store } = h.runtime
-    const saved = await settings.saveInstances('github', [{ config: { repository: 'acme/**' } }], store.blockRevision('instances:github'), 'panel')
+    const saved = await settings.saveInstances('github', [{ config: { repository: 'acme/**' }, policyFrom: 'github' }],
+      store.blockRevision('instances:github'), 'panel')
     expect(saved.restarting).toBe(false)
     expect(restart).not.toHaveBeenCalled()
-    expect(saved.instances.map(row => [row.config.repository, row.config.observeIssues, row.config.observePulls, row.config.observeComments]))
-      .toEqual([['acme/Gadgets', true, true, true], ['acme/tools', true, true, true]])
-    expect(Object.values(h.runtime.deployment.repositories ?? {})).toEqual(['acme/Gadgets', 'acme/tools'])
-    // The new repositories start from the default repository's allowed accounts.
-    expect(store.settings().policy.sources[saved.instances[0]!.id]).toEqual(store.settings().policy.sources.github)
-    // Saving the pattern again adds nothing it already lists.
-    const again = await settings.saveInstances('github', [...saved.instances, { config: { repository: 'acme/*' } }],
-      store.blockRevision('instances:github'), 'panel')
-    expect(again.instances.map(row => row.id)).toEqual(saved.instances.map(row => row.id))
-    await expect(settings.saveInstances('github', [{ config: { repository: 'nobody/**' } }], store.blockRevision('instances:github'), 'panel'))
-      .rejects.toMatchObject({ code: 'patternEmpty' })
+    expect(saved.instances).toEqual([{ id: 'github-2', enabled: true, config: expect.objectContaining({ repository: 'acme/**',
+      observeIssues: true, observePulls: true, observeComments: true }) }])
+    expect(store.settings().sources['github-2']?.config.repository).toBe('acme/**')
+    // Setup lists no repository for it: the GitHub Source finds the repositories it covers at runtime.
+    expect(h.runtime.deployment.patterns).toEqual({ 'github-2': 'acme/**' })
+    expect(h.runtime.deployment.repositories).toEqual({})
+    // Saving again keeps the one row.
+    const again = await settings.saveInstances('github', saved.instances, store.blockRevision('instances:github'), 'panel')
+    expect(again.instances.map(row => [row.id, row.config.repository])).toEqual([['github-2', 'acme/**']])
+    await expect(settings.saveInstances('github', [...again.instances, { config: { repository: 'nobody/**' } }], store.blockRevision('instances:github'),
+      'panel')).rejects.toMatchObject({ code: 'repositoriesRefused' })
+    // A pattern row with an open ticket in a repository it covers stays until the ticket ends.
+    const covered = memberId('github-2', 'acme/tools')
+    store.tickets.save({ id: 't-tools', title: 'tools work', decisionId: 'd', mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' },
+      actor: { source: covered, id: 'alice' }, scope: '' }, channels: [{ source: covered, thread: `${covered}:3`, address: { number: '3' } }],
+    assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '', origin: { triggerId: 'none', triggerIds: [] } })
+    await expect(settings.saveInstances('github', [], store.blockRevision('instances:github'), 'panel')).rejects.toMatchObject({ code: 'instanceInUse' })
+  })
+})
+
+const PATTERN_ROW = 'github-3'
+const TOOLS = 'acme/tools'
+/** The default repository, an explicit row for acme/gadgets, and a pattern row acme/** whose policy part allows carol. */
+function patternHost(config: Record<string, unknown> = {}) {
+  const store = new Store(join(mkdtempSync(join(tmpdir(), 'multi-repo-')), 'db.sqlite'))
+  store.saveSettings(SettingsSchema.parse({ ...stored, sources: { ...stored.sources,
+    [PATTERN_ROW]: { enabled: true, kind: 'github', config: { repository: 'acme/**', ...config } } },
+  policy: { sources: { ...stored.policy.sources, [PATTERN_ROW]: { allowed: [{ id: 'carol' }] } } } }))
+  const board = new HealthBoard()
+  const verified = testDeployment({ repositories: { 'github-2': GADGETS }, patterns: { [PATTERN_ROW]: 'acme/**' } })
+  const members = new Map<string, Record<string, string>>()
+  let current = verified
+  const sources = new SourceRegistry(() => store.settings(), board, undefined, () => patternMembers(current))
+  sources.register(githubKind)
+  const assessor: Assessor = { request: vi.fn(async () => {}) }
+  const executor: Executor = { start: vi.fn(async () => {}), deliver: vi.fn(async () => {}), stop: vi.fn(async () => {}) }
+  const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
+  const engine = new Engine({ repo: store, scope: sources, policy: () => settingsPolicy(store.settings(), sources), assessor, executor, outbox })
+  const commands = new Commands(() => current, {}, new AbortController().signal)
+  const receive = vi.fn(async (trigger: Trigger) => engine.receive(trigger))
+  const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, get deployment() { return current },
+    ready: Promise.resolve(), configured: () => true, receive,
+    adopt: (row, covered) => { members.set(row, covered); current = withMembers(verified, members) } }
+  const base = sourceContextOf(deps, { kind: 'github', health: ['github'] })
+  const patterns = new RepositoryPatterns(base, row => sources.instanceHealth(row).get(`github@${row}`))
+  return { store, sources, board, base, patterns, receive, commands, deployment: () => current,
+    contexts: () => instanceContexts({ sources, context: () => base }, base, patterns) }
+}
+/** Runs the GitHub Source's loop until `done` holds, then stops it. */
+async function watching(h: ReturnType<typeof patternHost>, done: () => boolean): Promise<void> {
+  const controller = new AbortController()
+  const running = watch(h.base, controller.signal, h.contexts, h.patterns)
+  await vi.waitFor(() => { if (!done()) throw new Error('not yet') })
+  controller.abort()
+  await running
+}
+const listed = (name: string, push = true, extra: Record<string, unknown> = {}) => ({ full_name: name, permissions: { push }, fork: false,
+  archived: false, ...extra })
+
+describe('repository pattern rows', () => {
+  it('takes a mention in a repository no instance has yet into the pattern row\'s instance, with the row\'s policy', async () => {
+    const h = patternHost()
+    const fresh = 'acme/fresh'
+    const reads = github({
+      // The listing predates the repository; its first mention brings it in.
+      'user/repos': [listed(GADGETS)],
+      notifications: [{ repository: { full_name: fresh }, updated_at: new Date().toISOString(), subject: { url: `https://api.github.com/repos/${fresh}/issues/7` } }],
+      [`repos/${fresh}/issues/7`]: { ...issue(7, '@agent-bot please fix', 'carol'), html_url: `https://github.com/${fresh}/issues/7` },
+    })
+    await watching(h, () => h.receive.mock.calls.length > 0)
+    const id = memberId(PATTERN_ROW, fresh)
+    const [trigger] = h.receive.mock.calls[0]!
+    expect(trigger).toMatchObject({ source: id, actor: { source: id, id: 'carol' }, addressed: 'mention' })
+    expect(reads.filter(path => path.startsWith(`repos/${fresh}/`)).length).toBeGreaterThan(0)
+    // The row's Policy part, switches and kind are the instance's; the allowed list of the default repository is not.
+    const settings = h.store.settings()
+    expect(allowedSender(settings, { source: id, id: 'carol' })).toBeDefined()
+    expect(allowedSender(settings, { source: id, id: 'alice' })).toBeUndefined()
+    expect(settingsPolicy(settings, h.sources).gate(trigger, h.store.threads.get(`${id}:7`)!, [])).toMatchObject({ admissible: true, strength: 'explicit' })
+    expect(h.sources.kind(id)).toBe(githubKind)
+    expect(h.sources.title(id)).toEqual({ zh: `GitHub · ${fresh}`, en: `GitHub · ${fresh}` })
+    expect(h.sources.find('#7').threads).toContain(`${id}:7`)
+    // The settings keep one row; the deployment lists the repository it covers, and so does the execution environment.
+    expect(Object.keys(settings.sources)).toEqual(['github', 'github-2', PATTERN_ROW])
+    expect(repositoryOf(h.deployment(), id)).toBe(fresh)
+    expect(githubKind.environment!.values({ deployment: h.deployment(), config: {} as never, trigger }).DSH_SUPERAGENT_GITHUB_REPOSITORIES)
+      .toBe(`acme/widgets ${GADGETS} ${fresh}`)
+    // The membership survives a restart, and the row reports one health entry for its repositories.
+    expect(h.store.get(`${PATTERN_ROW}/${KV.github.members}` as typeof KV.github.members)).toEqual({ [id]: fresh })
+    expect(h.board.all[`github@${PATTERN_ROW}`]).toMatchObject({ state: 'ready', detail: expect.stringContaining(fresh) })
+    expect(h.board.all[`github@${id}`]).toBeUndefined()
+    h.store.close()
+  })
+  it('leaves a repository on its explicit row and the default repository to the default instance', async () => {
+    const h = patternHost()
+    github({
+      'user/repos': [listed('acme/widgets'), listed('acme/Gadgets')],
+      notifications: [{ repository: { full_name: 'acme/Gadgets' }, updated_at: new Date().toISOString(), subject: { url: `https://api.github.com/repos/${GADGETS}/issues/3` } }],
+      [`repos/${GADGETS}/issues/3`]: issue(3, '@agent-bot please fix'),
+    })
+    await watching(h, () => h.receive.mock.calls.length > 0)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.source)).toEqual(['github-2'])
+    expect(patternMembers(h.deployment())).toEqual({})
+    // A repository a pattern took before its explicit row was added goes back to that row.
+    expect(withMembers(testDeployment({ repositories: { 'github-2': GADGETS }, patterns: { [PATTERN_ROW]: 'acme/**' } }),
+      new Map([[PATTERN_ROW, { [memberId(PATTERN_ROW, GADGETS)]: GADGETS, [memberId(PATTERN_ROW, TOOLS)]: TOOLS }]])).repositories)
+      .toEqual({ 'github-2': GADGETS, [memberId(PATTERN_ROW, TOOLS)]: TOOLS })
+    h.store.close()
+  })
+  it('lists the account\'s repositories at most once an interval, and starts watching the new ones its switches receive', async () => {
+    const h = patternHost({ observeIssues: true })
+    const reads = github({ 'user/repos': [listed('acme/widgets'), listed(TOOLS), listed('acme/forked', true, { fork: true }),
+      listed('acme/old', true, { archived: true }), listed('acme/readonly', false), listed('other/thing')],
+    [`repos/${TOOLS}/subscription`]: { subscribed: false, ignored: false } })
+    const start = Date.now()
+    expect(await h.patterns.list(h.commands, start)).toBe(true)
+    expect(await h.patterns.list(h.commands, start + 60_000)).toBe(false)
+    expect(reads.filter(path => path.startsWith('user/repos'))).toHaveLength(1)
+    const id = memberId(PATTERN_ROW, TOOLS)
+    expect(patternMembers(h.deployment())).toEqual({ [id]: TOOLS })
+    // The new repository's instance starts its watch in its first round.
+    const member = h.contexts().find(context => context.instance === id)!
+    await pollRound(member)
+    expect(reads).toContain(`repos/${TOOLS}/subscription`)
+    expect(h.store.get(`${id}/${KV.github.watching}` as typeof KV.github.watching)).toEqual({ by: 'agent' })
+    expect(await h.patterns.list(h.commands, start + LISTING_INTERVAL_MS)).toBe(true)
+    expect(reads.filter(path => path.startsWith('user/repos'))).toHaveLength(2)
+    h.store.close()
+  })
+  it('lets go of a repository the account lost push access to, or that no longer matches, and of its watch', async () => {
+    const h = patternHost({ observeIssues: true })
+    let repositories = [listed(TOOLS), listed('acme/gone')]
+    const reads = github({ get 'user/repos'() { return repositories } })
+    const start = Date.now()
+    await h.patterns.list(h.commands, start)
+    const tools = memberId(PATTERN_ROW, TOOLS)
+    h.store.set(`${tools}/${KV.github.watching}` as typeof KV.github.watching, { by: 'agent' })
+    expect(Object.values(patternMembers(h.deployment()))).toEqual([TOOLS, 'acme/gone'])
+    repositories = [listed(TOOLS, false)]
+    await h.patterns.list(h.commands, start + LISTING_INTERVAL_MS)
+    expect(patternMembers(h.deployment())).toEqual({})
+    expect(reads).toContain(`repos/${TOOLS}/subscription`)
+    expect(h.store.get(`${tools}/${KV.github.watching}` as typeof KV.github.watching)).toBeUndefined()
+    // A mention from a repository the last listing showed it cannot push to does not bring it back.
+    expect(h.patterns.take({ since: new Date().toISOString(), interval: 60, notifications: [{ repository: { full_name: TOOLS }, subject: {} }] })).toBe(false)
+    // A repository the default instance takes over leaves the row.
+    repositories = [listed('acme/widgets'), listed(TOOLS)]
+    await h.patterns.list(h.commands, start + 2 * LISTING_INTERVAL_MS)
+    expect(Object.values(patternMembers(h.deployment()))).toEqual([TOOLS])
+    h.store.close()
   })
 })

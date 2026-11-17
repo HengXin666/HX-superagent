@@ -1,4 +1,7 @@
-/** Repository table of the GitHub Source: one extra GitHub instance per repository, added one by one or pasted in bulk, saved together. */
+/**
+ * Repository table of the GitHub Source: one extra GitHub instance per repository or pattern row (such as `owner/**`), added one by one
+ * or pasted in bulk, saved together.
+ */
 import { useMemo, useState } from 'react'
 import { SaveBar, useDraft } from './draft.tsx'
 import { usePanel, usePanelData } from './provider.tsx'
@@ -7,7 +10,7 @@ import { Hint } from './widgets.tsx'
 import { Button, Field, Icon, Input, Switch, Select, Textarea } from './ui/index.ts'
 
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
-/** A pattern such as `owner/**`: saving adds every repository of that owner the agent account can push to. */
+/** A pattern such as `owner/**`: one row that covers, live, every repository of that owner the agent account can push to. */
 const PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.*-]*\*[A-Za-z0-9_.*-]*$/
 const ENTRY = new RegExp(`(?:${REPOSITORY.source.slice(1, -1)})|(?:${PATTERN.source.slice(1, -1)})`)
 const readable = (name: string) => REPOSITORY.test(name) || PATTERN.test(name)
@@ -18,7 +21,7 @@ export type Observed = typeof OBSERVED[number]
 export interface RepositoryRow { id?: string; repository: string; enabled: boolean; observe?: Partial<Record<Observed, boolean>> }
 /**
  * Reads pasted repositories: one per line, or separated by spaces or commas, written owner/name, as a pattern such as owner/** (every
- * repository of the owner the agent account can push to, expanded when saved), or as a github.com page (the repository, an Issue or a PR in it). Returns the repositories in order, without repeats, and the entries it could not read.
+ * repository of the owner the agent account can push to, matched live and kept as one row), or as a github.com page (the repository, an Issue or a PR in it). Returns the repositories in order, without repeats, and the entries it could not read.
  */
 export function parseRepositories(text: string): { repositories: string[]; invalid: string[] } {
   const repositories: string[] = [], invalid: string[] = []

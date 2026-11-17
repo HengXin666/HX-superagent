@@ -49,13 +49,15 @@ export const KV = {
   /**
    * GitHub Source: notification cursor and pending retries; per-Issue/PR read cursor shared by notification and polled reads;
    * whether the account watches the repository and who started the watch; default-branch CI state; and per-PR CI fingerprint and
-   * revision (`revision` counts reported CI changes so each produces a distinct Trigger ID).
+   * revision (`revision` counts reported CI changes so each produces a distinct Trigger ID); the repositories a pattern row covers,
+   * by the IDs of their instances; and when the account's repositories were last listed for the pattern rows.
    */
   github: { since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
     cursor: family<string, [number: number]>('github-cursor:'),
     watching: record<{ by: 'agent' | 'user' }>('github-watching'),
     branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
-    ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
+    ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:'),
+    members: record<Record<string, string>>('github-members'), listed: record<string>('github-listed') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

@@ -8,6 +8,7 @@ import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionR
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
+import { patternRowOf } from './infra/repository-pattern.ts'
 import { WORKER_COMMANDS } from './infra/environment.ts'
 
 export const RuleIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
@@ -133,12 +134,20 @@ export const POLICY_REVISION = 'mandate-v3'
 export function policyVersion(settings: Settings): string {
   return key(POLICY_REVISION, JSON.stringify({ rules: settings.policy.rules, mode: settings.eval.mode, sources: settings.policy.sources }))
 }
+/**
+ * The Policy part of Source instance `source`: its own, or for an instance a pattern row materialized (`memberId`) the row's, which
+ * every repository the row covers shares.
+ */
+export function policyPartOf(settings: Settings, source: string): Settings['policy']['sources'][string] | undefined {
+  const row = patternRowOf(source)
+  return settings.policy.sources[source] ?? (row === undefined ? undefined : settings.policy.sources[row])
+}
 export function allowedSender(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
-  return settings.policy.sources[actor.source]?.allowed.find(entry => sameName(entry.id, actor.id))
+  return policyPartOf(settings, actor.source)?.allowed.find(entry => sameName(entry.id, actor.id))
 }
 /** Look up `actor` in the Source's `bots` policy list (validated by the Source's kind), whose messages are admitted as inferred candidates at most. */
 export function listedBot(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
-  const bots = z.array(AllowedSchema).catch([]).parse(settings.policy.sources[actor.source]?.bots ?? [])
+  const bots = z.array(AllowedSchema).catch([]).parse(policyPartOf(settings, actor.source)?.bots ?? [])
   return bots.find(entry => sameName(entry.id, actor.id))
 }
 export const anyoneAllowed = (settings: Settings): boolean => Object.values(settings.policy.sources).some(part => part.allowed.length > 0)
@@ -153,7 +162,7 @@ function admissionCell(allowed: boolean, addressed: boolean): AdmissionCell | un
   return allowed ? addressed ? undefined : 'listedUnaddressed' : addressed ? 'unlistedAddressed' : 'unlistedUnaddressed'
 }
 function admissionOf(settings: Settings, source: string, row: string | undefined, cell: AdmissionCell): Admission {
-  return (row === undefined ? undefined : settings.policy.sources[source]?.admission[row]?.[cell]) ?? ADMISSION_DEFAULTS[cell]
+  return (row === undefined ? undefined : policyPartOf(settings, source)?.admission[row]?.[cell]) ?? ADMISSION_DEFAULTS[cell]
 }
 const STRENGTH: Readonly<Record<Admission, number>> = { ignore: 0, inferred: 1, explicit: 2 }
 
