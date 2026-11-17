@@ -88,9 +88,9 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   kind: string
   /**
    * Extra instances besides the default one: each has its own ID (`<kind>-<n>`), configuration, policy part, Threads and health
-   * entries (`<entry>@<id>`). `shared` fields are the account's and live on the default instance only; `label` names an instance.
+   * entries (`<entry>@<id>`). `max` caps the instances, the default one included (none when absent). `shared` fields are the account's and live on the default instance only; `label` names an instance.
    */
-  multiple?: { max: number; shared: readonly string[]; label(config: C): string }
+  multiple?: { max?: number; shared: readonly string[]; label(config: C): string }
   title: Localized
   description: Localized
   /** Read-only status facts derived from `deployment` (undefined while waiting for setup), keyed by field key. */

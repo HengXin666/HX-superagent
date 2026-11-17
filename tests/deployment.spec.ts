@@ -57,6 +57,25 @@ describe('configuration schema', () => {
 })
 
 describe('setup', () => {
+  it('checks a long repository table against one listing of the account\'s repositories, reading alone only those it leaves out', async () => {
+    const calls: string[] = []
+    const extras = Array.from({ length: 10 }, (_, n) => ({ id: `github-${n + 2}`, repository: `acme/r${n}` }))
+    const listed = Array.from({ length: 9 }, (_, n) => JSON.stringify({ name: `acme/r${n}`, push: n !== 8, fork: false, archived: false }))
+    const fake: Probe = async argv => {
+      const args = argv.slice(1).join(' ')
+      calls.push(args.split(' ').slice(0, 2).join(' '))
+      if (args === 'api user') return '{"login":"Agent-Bot","id":7}'
+      if (args.startsWith('api --paginate user/repos')) return listed.join('\n')
+      const read = /^api repos\/(\S+) /.exec(args)?.[1]
+      if (read) return JSON.stringify({ name: read, push: true })
+      throw new Error(`unexpected ${args}`)
+    }
+    const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, fake, path, extras)
+    expect(calls.filter(call => call.startsWith('api repos/'))).toEqual(['api repos/acme/widgets', 'api repos/acme/r9'])
+    expect(calls.filter(call => call === 'api --paginate')).toHaveLength(1)
+    expect(Object.values(deployment.repositories ?? {})).toEqual([...Array.from({ length: 8 }, (_, n) => `acme/r${n}`), 'acme/r9'])
+    expect(Object.keys(deployment.repositoryProblems ?? {})).toEqual(['github-10'])
+  })
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
     expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })

@@ -70,7 +70,7 @@ const agentsPull = (number: number, ref: string): Pull =>
 const openPull = (number: number) => ({ number, title: 'Fix the margin', state: 'open',
   html_url: `https://github.com/acme/widgets/pull/${number}`, user: { login: 'carol' },
   head: { sha: 'abc', ref: 'fix', repo: { full_name: 'acme/widgets' } } })
-const notification = (number: number, kind: 'issues' | 'pulls' = 'issues') => ({ id: `n${number}`, updated_at: '2026-09-09T00:00:00Z',
+const notification = (number: number, kind: 'issues' | 'pulls' = 'issues') => ({ id: `n${number}`, updated_at: new Date().toISOString(),
   reason: 'mention',
   repository: { full_name: 'acme/widgets' }, subject: { url: `https://api.github.com/repos/acme/widgets/${kind}/${number}`,
     type: kind === 'pulls' ? 'PullRequest' : 'Issue', title: '' } })
@@ -650,7 +650,7 @@ describe('github source', () => {
       return JSON.stringify(args.includes('--slurp') ? [[]] : [])
     })
     expect(await pollRound(h)).toBe(120)
-    const notifications = calls.filter(args => args[1]!.includes('/notifications'))
+    const notifications = calls.filter(args => args[1]!.startsWith('notifications?'))
     expect(notifications.map(args => args.includes('--paginate'))).toEqual([false, true])
     const paths = calls.map(args => args[1]!.split('?')[0])
     expect(paths).toEqual(expect.arrayContaining(['repos/acme/widgets/issues/12', 'repos/acme/widgets/issues/13']))
@@ -1197,13 +1197,18 @@ describe('observing the GitHub repository', () => {
     h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config } } })
   /** GitHub as the repository's lists and its default branch answer; a request with the ETag of an unchanged list answers 304. */
   function repository(h: ReturnType<typeof host>, answers: { issues?: unknown[]; comments?: unknown[]; reviewComments?: unknown[];
-    branch?: { sha: string; checks: unknown[] } }) {
+    branch?: { sha: string; checks: unknown[] }; subscription?: { subscribed: boolean; ignored: boolean } }) {
     const calls: string[][] = []
     vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => {
       calls.push(args)
       const bare = args[1]!.replace(/^repos\/acme\/widgets\/?/, '').split('?')[0]!
       const listed = (list: unknown[] | undefined) => `HTTP/2.0 200 OK\r\nETag: "same"\r\n\r\n${JSON.stringify(list ?? [])}`
       if (bare === 'notifications') return 'HTTP/2.0 200 OK\r\n\r\n[]'
+      if (bare === 'subscription') {
+        if (args.includes('-X')) return ''
+        if (!answers.subscription) throw refused(404, 'Not Found')
+        return JSON.stringify(answers.subscription)
+      }
       if (args.includes('If-None-Match: "same"')) throw commandError({ stderr: 'gh: HTTP 304', code: 1 })
       if (bare === 'issues') return listed(answers.issues)
       if (bare === 'issues/comments') return listed(answers.comments)
@@ -1215,96 +1220,67 @@ describe('observing the GitHub repository', () => {
     })
     return calls
   }
-  it('takes in the new Issues and PRs from when it started observing them, and asks again with the ETag while nothing is newer',
+  it('watches the repository once it receives Issues, PRs or comments in full, and stops the watch it started when all are off',
     async () => {
-    const h = host()
-    observe(h, { observeIssues: true, observePulls: true })
-    h.store.set('github-since', at(-24))
-    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0), pulls: at(0) } })
-    const calls = repository(h, { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
-      issue(4, { created_at: at(2), updated_at: at(2) }),
-      { ...issue(5, { created_at: at(3), updated_at: at(3) }), pull_request: { url: 'x' } },
-      issue(6, { created_at: at(4), updated_at: at(4), user: { login: 'agent-bot', type: 'User' } })] })
-    await pollRound(h)
-    // #3 was opened before the Source observed Issues, and #6 is the agent's own.
-    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind, trigger.id]))
-      .toEqual([[4, 'issue', issueTrigger(issue(4), 'agent-bot').id], [5, 'pull', issueTrigger(issue(5), 'agent-bot').id]])
-    const started = { issues: at(0), pulls: at(0) }
-    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started })
-    const list = () => calls.filter(args => args[1]!.startsWith('repos/acme/widgets/issues?'))
-    expect(list()[0]![1]).toContain(`since=${encodeURIComponent(at(0))}`)
-    // The next round repeats the request at the newest Issue, whose ETag the round after sends, which GitHub answers 304 for.
-    await pollRound(h)
-    expect(h.store.get('github-stream:issues')).toEqual({ since: cursorAt(at(4)), started, etag: '"same"' })
-    h.receive.mockClear()
-    await pollRound(h)
-    expect(list().at(-1)).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
-    expect(h.receive).not.toHaveBeenCalled()
-    // Switched off, the stream forgets where it was, so it starts afresh once switched on again.
-    observe(h, {})
-    await pollRound(h)
-    expect(h.store.get('github-stream:issues')).toBeUndefined()
-    h.store.close()
-  })
-  it('takes in the repository\'s conversation and review comments, on the Issue or PR each is on', async () => {
-    const h = host()
-    observe(h, { observeComments: true })
-    h.store.set('github-since', at(-24))
-    for (const stream of ['comments', 'review-comments']) {
-      h.store.set(`github-stream:${stream}`, { since: at(0), started: { comments: at(0) } })
-    }
-    const comment = (id: number, fields: Record<string, unknown>) => ({ id, body: `comment ${id}`, user: { login: 'carol', type: 'User' },
-      created_at: at(1), updated_at: at(1), ...fields })
-    repository(h, {
-      comments: [comment(1, { issue_url: 'https://api.github.com/repos/acme/widgets/issues/7',
-        html_url: 'https://github.com/acme/widgets/issues/7#issuecomment-1' }),
-        comment(2, { issue_url: 'https://api.github.com/repos/acme/widgets/issues/9',
-          html_url: 'https://github.com/acme/widgets/pull/9#issuecomment-2',
-          user: { login: 'dependabot[bot]', type: 'Bot' } })],
-      reviewComments: [comment(3, { pull_request_url: 'https://api.github.com/repos/acme/widgets/pulls/9', path: 'src/a.ts', line: 4,
-        html_url: 'https://github.com/acme/widgets/pull/9#discussion_r3' })] })
-    await pollRound(h)
-    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.isPr, trigger.meta.kind, trigger.human]))
-      .toEqual([[7, false, 'conversation', true], [9, true, 'conversation', false], [9, true, 'inline', true]])
-    h.store.close()
-  })
-  it('fails the round for a stream whose read fails, keeps its cursor, and still reads the other streams', async () => {
-    const h = host()
-    observe(h, { observeIssues: true, observeComments: true })
-    h.store.set('github-since', at(-24))
-    const kind = (stream: string) => stream === 'issues' ? 'issues' : 'comments'
-    for (const stream of ['issues', 'comments', 'review-comments']) {
-      h.store.set(`github-stream:${stream}`, { since: at(0), started: { [kind(stream)]: at(0) } })
-    }
-    const comment = { id: 1, body: 'looks off', user: { login: 'carol', type: 'User' }, created_at: at(1), updated_at: at(1),
-      issue_url: 'https://api.github.com/repos/acme/widgets/issues/7', html_url: 'https://github.com/acme/widgets/issues/7#issuecomment-1' }
-    repository(h, { comments: [comment] })
-    const run = h.commands.run as unknown as { getMockImplementation(): (program: string, args: string[]) => Promise<string> }
-    const answer = run.getMockImplementation()
-    vi.mocked(h.commands.run).mockImplementation(async (program, args) => {
-      if (args[1]!.startsWith('repos/acme/widgets/issues?')) throw refused(502, 'Bad Gateway')
-      return answer(program, args)
-    })
-    await expect(pollRound(h)).rejects.toThrow(/issues: .*502/)
-    expect(h.store.get('github-stream:issues')).toEqual({ since: at(0), started: { issues: at(0) } })
-    expect(h.receive).toHaveBeenCalledWith(expect.objectContaining({ text: 'looks off' }))
-    expect(h.store.get('github-stream:comments')).toEqual({ since: cursorAt(at(1)), started: { comments: at(0) } })
-    h.store.close()
-  })
-  it('reads a stream whose cursor is older than the polling horizon from the horizon, without the ETag of the older request', async () => {
     const h = host()
     observe(h, { observeIssues: true })
     h.store.set('github-since', at(-24))
-    const old = new Date(Date.now() - 20 * 86_400_000).toISOString()
-    h.store.set('github-stream:issues', { since: old, started: { issues: old }, etag: '"same"' })
     const calls = repository(h, {})
+    const watched = () => calls.filter(args => args[1] === 'repos/acme/widgets/subscription').map(args => args.slice(2).join(' '))
     await pollRound(h)
-    const list = calls.find(args => args[1]!.startsWith('repos/acme/widgets/issues?'))!
-    expect(list).not.toContain('-H')
-    const since = Date.parse(decodeURIComponent(/since=([^&]+)/.exec(list[1]!)![1]!))
-    // The horizon, on the hour.
-    expect(Date.now() - POLL_HORIZON_MS - since).toBeGreaterThanOrEqual(0)
-    expect(Date.now() - POLL_HORIZON_MS - since).toBeLessThan(3_600_000)
+    expect(watched()).toEqual(['', '-X PUT -F subscribed=true -F ignored=false'])
+    expect(h.store.get('github-watching')).toEqual({ by: 'agent' })
+    // Watching already, later rounds ask nothing more of the repository than its inbox.
+    calls.length = 0
+    await pollRound(h)
+    expect(calls.map(args => args[1]!.split('?')[0])).toEqual(['notifications'])
+    observe(h, {})
+    await pollRound(h)
+    expect(watched()).toEqual(['-X DELETE'])
+    expect(h.store.get('github-watching')).toBeUndefined()
+    h.store.close()
+  })
+  it('keeps a watch the account already had, also when its observation switches turn off', async () => {
+    const h = host()
+    observe(h, { observeComments: true })
+    h.store.set('github-since', at(-24))
+    const calls = repository(h, { subscription: { subscribed: true, ignored: false } })
+    const changed = () => calls.filter(args => args[1] === 'repos/acme/widgets/subscription' && args.includes('-X'))
+    await pollRound(h)
+    expect(h.store.get('github-watching')).toEqual({ by: 'user' })
+    observe(h, {})
+    await pollRound(h)
+    expect(changed()).toEqual([])
+    expect(h.store.get('github-watching')).toBeUndefined()
+    h.store.close()
+  })
+  it('leaves a watch to a later round once the round has made as many watch changes as it may', async () => {
+    const h = host()
+    observe(h, { observePulls: true })
+    h.store.set('github-since', at(-24))
+    const calls = repository(h, {})
+    await pollRound(h, undefined, undefined, { left: 0 })
+    expect(calls.some(args => args[1]!.endsWith('/subscription'))).toBe(false)
+    expect(h.store.get('github-watching')).toBeUndefined()
+    const budget = { left: 1 }
+    await pollRound(h, undefined, undefined, budget)
+    expect(budget.left).toBe(0)
+    expect(h.store.get('github-watching')).toEqual({ by: 'agent' })
+    h.store.close()
+  })
+  it('fails the round when the watch cannot be changed, and tries again in the next one', async () => {
+    const h = host()
+    observe(h, { observeIssues: true })
+    h.store.set('github-since', at(-24))
+    repository(h, {})
+    const run = h.commands.run as unknown as { getMockImplementation(): (program: string, args: string[]) => Promise<string> }
+    const answer = run.getMockImplementation()
+    vi.mocked(h.commands.run).mockImplementation(async (program, args) => {
+      if (args.includes('PUT')) throw refused(403, 'Forbidden')
+      return answer(program, args)
+    })
+    await expect(pollRound(h)).rejects.toThrow(/watching: .*403/)
+    expect(h.store.get('github-watching')).toBeUndefined()
     h.store.close()
   })
   it('starts the default branch\'s CI afresh when the default branch is renamed, without a Trigger', async () => {
@@ -1317,43 +1293,6 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.receive).not.toHaveBeenCalled()
     expect(h.store.get('github-branch-ci')).toEqual({ branch: 'main', failures: ['lint'], revision: 2 })
-    h.store.close()
-  })
-  it('takes in new PRs only from when their switch turned on, apart from when new Issues were', async () => {
-    const h = host()
-    observe(h, { observeIssues: true, observePulls: true })
-    h.store.set('github-since', at(-24))
-    // The stream took in Issues from hour 0; PRs were switched on only now.
-    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
-    repository(h, { issues: [{ ...issue(5, { created_at: at(2), updated_at: at(2) }), pull_request: { url: 'x' } },
-      issue(6, { created_at: at(3), updated_at: at(3) })] })
-    await pollRound(h)
-    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind])).toEqual([[6, 'issue']])
-    expect(h.store.get<{ started: Record<string, string> }>('github-stream:issues')!.started).toEqual({ issues: at(0), pulls: expect.any(String) })
-    // Switched off, a kind forgets its start.
-    observe(h, { observePulls: true })
-    await pollRound(h)
-    expect(Object.keys(h.store.get<{ started: Record<string, string> }>('github-stream:issues')!.started)).toEqual(['pulls'])
-    h.store.close()
-  })
-  it('keeps a stream\'s cursor five seconds before its newest item, and a stale cursor on the hour, so the ETag is sent again', async () => {
-    const h = host()
-    observe(h, { observeIssues: true })
-    h.store.set('github-since', at(-24))
-    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
-    repository(h, { issues: [issue(6, { created_at: at(3), updated_at: at(3) })] })
-    await pollRound(h)
-    expect(h.store.get<{ since: string }>('github-stream:issues')!.since).toBe(new Date(Date.parse(at(3)) - 5000).toISOString())
-    // A cursor behind the horizon reads from the horizon on the hour, the same in the next round, which sends the ETag.
-    const old = new Date(Date.now() - 20 * 86_400_000).toISOString()
-    h.store.set('github-stream:issues', { since: old, started: { issues: old } })
-    const calls = repository(h, {})
-    await pollRound(h); await pollRound(h)
-    const lists = calls.filter(args => args[1]!.startsWith('repos/acme/widgets/issues?'))
-    const since = (args: string[]) => decodeURIComponent(/since=([^&]+)/.exec(args[1]!)![1]!)
-    expect(since(lists[0]!)).toBe(since(lists[1]!))
-    expect(Date.parse(since(lists[0]!)) % 3_600_000).toBe(0)
-    expect(lists[1]).toEqual(expect.arrayContaining(['-H', 'If-None-Match: "same"']))
     h.store.close()
   })
   it('gives each change of the default branch\'s CI its own id, also when one commit fails, passes and fails again', async () => {

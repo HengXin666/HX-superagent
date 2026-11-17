@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Engine, type Assessor, type Executor, type Ticket, type Trigger } from '../src/core/index.ts'
 import { SettingsSchema, allowedSender, settingsPolicy } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { githubKind, githubKindWith, instanceContext, pollRound } from '../src/sources/github.ts'
+import { githubKind, githubKindWith, instanceContext, pollRound, readInbox } from '../src/sources/github.ts'
 import { issueTrigger } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, type Pull } from '../src/sources/github-pull.ts'
 import { readGithub } from '../src/sources/github-read.ts'
@@ -122,11 +122,12 @@ describe('polling an extra GitHub instance', () => {
   it('reads its own repository and records its Triggers, Threads, cursors and health apart from the default instance', async () => {
     const h = host()
     const reads = github({
-      [`repos/${GADGETS}/notifications`]: [{ repository: { full_name: 'acme/Gadgets' }, subject: { url: `https://api.github.com/repos/${GADGETS}/issues/3` } }],
+      notifications: [{ repository: { full_name: 'acme/Gadgets' }, subject: { url: `https://api.github.com/repos/${GADGETS}/issues/3` } }],
       [`repos/${GADGETS}/issues/3`]: issue(3, '@agent-bot please fix'),
     })
     await pollRound(h.gadgets)
-    expect(reads.every(path => path.startsWith(`repos/${GADGETS}/`))).toBe(true)
+    // The inbox is the account's; every other read is of the instance's own repository.
+    expect(reads.filter(path => !path.startsWith('notifications?')).every(path => path.startsWith(`repos/${GADGETS}/`))).toBe(true)
     const received = h.receive.mock.calls.map(([trigger]) => trigger)
     expect(received).toHaveLength(1)
     expect(received[0]).toMatchObject({ source: 'github-2', actor: { source: 'github-2', id: 'bob' }, addressed: 'mention' })
@@ -139,6 +140,30 @@ describe('polling an extra GitHub instance', () => {
     expect(h.board.all.github?.state).not.toBe('ready')
     h.store.close()
   })
+  it('reads the account\'s inbox once for every repository, from the earliest cursor, and gives each repository its own notifications',
+    async () => {
+    const h = host()
+    const now = Date.now()
+    h.store.set(KV.github.since, new Date(now - 30 * 60_000).toISOString())
+    h.store.set(`github-2/${KV.github.since}` as typeof KV.github.since, new Date(now - 60_000).toISOString())
+    const fresh = new Date(now - 5_000).toISOString(), stale = new Date(now - 25 * 60_000).toISOString()
+    const reads = github({
+      notifications: [
+        { repository: { full_name: 'acme/widgets' }, updated_at: stale, subject: { url: 'https://api.github.com/repos/acme/widgets/issues/1' } },
+        { repository: { full_name: GADGETS }, updated_at: stale, subject: { url: `https://api.github.com/repos/${GADGETS}/issues/2` } },
+        { repository: { full_name: GADGETS }, updated_at: fresh, subject: { url: `https://api.github.com/repos/${GADGETS}/issues/3` } }],
+      'repos/acme/widgets/issues/1': { ...issue(1, '@agent-bot one'), html_url: 'https://github.com/acme/widgets/issues/1' },
+      [`repos/${GADGETS}/issues/3`]: issue(3, '@agent-bot three'),
+    })
+    const inbox = readInbox(h.commands, new Date(now - 30 * 60_000).toISOString())
+    await pollRound(h.base, undefined, inbox)
+    await pollRound(h.gadgets, undefined, inbox)
+    expect(reads.filter(path => path.startsWith('notifications?'))).toHaveLength(1)
+    // #2 was listed only because the default instance's cursor is earlier; the extra instance read up to its own cursor already.
+    expect(reads.some(path => path.endsWith(`${GADGETS}/issues/2`))).toBe(false)
+    expect(h.receive.mock.calls.map(([trigger]) => [trigger.source, trigger.meta.number])).toEqual([['github', 1], ['github-2', 3]])
+    h.store.close()
+  })
   it('takes in an Issue whose notification GitHub listed only after the cursor passed the Issue, once, and skips it in later rounds', async () => {
     const h = host()
     const now = Date.now()
@@ -148,12 +173,12 @@ describe('polling an extra GitHub instance', () => {
     const created = new Date(now - 32_000).toISOString()
     const opened = { ...issue(44, '@agent-bot reply with one sentence'), created_at: created }
     const reads = github({
-      [`repos/${GADGETS}/notifications`]: [{ repository: { full_name: GADGETS }, updated_at: new Date(now - 10_000).toISOString(),
+      notifications: [{ repository: { full_name: GADGETS }, updated_at: new Date(now - 10_000).toISOString(),
         subject: { url: `https://api.github.com/repos/${GADGETS}/issues/44` } }],
       [`repos/${GADGETS}/issues/44`]: opened,
     })
     await pollRound(h.gadgets)
-    const listed = reads.find(path => path.startsWith(`repos/${GADGETS}/notifications`))!
+    const listed = reads.find(path => path.startsWith('notifications?'))!
     expect(Date.parse(decodeURIComponent(/since=([^&]+)/.exec(listed)![1]!))).toBeLessThan(Date.parse(created))
     expect(h.receive.mock.calls.map(([trigger]) => trigger.source)).toEqual(['github-2'])
     expect(h.store.threads.get('github-2:44')).toBeDefined()
@@ -192,7 +217,8 @@ describe('polling an extra GitHub instance', () => {
       channel: { source: 'github-2', thread: 'github-2:3', address: { number: '3' } } })
     expect(sent).toBe('sent')
     expect(reads.filter(path => path.includes('/issues/3/comments'))).not.toHaveLength(0)
-    expect(reads.every(path => path.startsWith(`repos/${GADGETS}/`))).toBe(true)
+    // The inbox is the account's; every other read is of the instance's own repository.
+    expect(reads.filter(path => !path.startsWith('notifications?')).every(path => path.startsWith(`repos/${GADGETS}/`))).toBe(true)
     reads.length = 0
     await readGithub(h.commands, 'github-2/issues/3')
     expect(reads).toEqual([`repos/${GADGETS}/issues/3`])
