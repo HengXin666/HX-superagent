@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, expandRepositoryPattern, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, resolveDeployment, withMembers, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -33,6 +33,10 @@ export const extrasChanged = (before: Settings, after: Settings): boolean =>
  */
 export class Setup {
   private resolved?: Deployment
+  /** The repositories each pattern row covers right now, by row ID, as the GitHub Source found them (`adopt`). */
+  private readonly members = new Map<string, Record<string, string>>()
+  /** `resolved` with the pattern rows' repositories among its repositories, made again when either changes. */
+  private view?: Deployment
   problem?: SetupProblem
   feishuProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
@@ -50,12 +54,20 @@ export class Setup {
   get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
-    return this.resolved
+    return this.view ??= withMembers(this.resolved, this.members)
+  }
+  /**
+   * Sets the repositories pattern row `row` (such as `owner/**`) covers now, by the IDs of their instances; the running deployment
+   * lists them among its repositories (`withMembers` keeps the default and explicit rows' repositories theirs).
+   */
+  adopt(row: string, members: Record<string, string>): void {
+    if (Object.keys(members).length) this.members.set(row, { ...members }); else this.members.delete(row)
+    this.view = undefined
   }
   configured(): boolean { return this.resolved !== undefined }
   /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
   async run(settings: Settings): Promise<boolean> {
-    try { this.resolved = await this.resolve(settings); return true }
+    try { this.resolved = await this.resolve(settings); this.view = undefined; return true }
     catch (error) {
       if (!(error instanceof SetupError)) throw error
       this.problem = error.problem
@@ -103,21 +115,14 @@ export class Setup {
     this.checked = undefined
     const deployment = checked ?? await resolveDeployment(machine, settings.sources.github?.config, this.probe(), undefined, extras)
     for (const [id, problem] of Object.entries(deployment.repositoryProblems ?? {})) this.host.context.logger.warn('dsh-superagent leaves GitHub instance %s out: %s', id, problem)
-    const { repositories: _repositories, repositoryProblems: _problems, ...accounts } = this.resolved
+    const { repositories: _repositories, repositoryProblems: _problems, patterns: _patterns, ...accounts } = this.resolved
     this.resolved = { ...accounts, ...extras.length
-      ? { repositories: deployment.repositories ?? {}, repositoryProblems: deployment.repositoryProblems ?? {} } : {} }
-  }
-  /** The repositories the agent account can push to that match `pattern` (such as `owner/**`), with the CLI setup verified. */
-  async expandRepositories(pattern: string): Promise<string[]> {
-    if (!this.resolved) throw new UserError('patternUnavailable', { pattern })
-    const found = await expandRepositoryPattern(this.resolved.github.cli, pattern, this.probe()).catch((error: unknown) => {
-      throw new UserError('patternFailed', { pattern, error: error instanceof Error ? error.message : String(error) })
-    })
-    if (!found.length) throw new UserError('patternEmpty', { pattern })
-    return found
+      ? { repositories: deployment.repositories ?? {}, repositoryProblems: deployment.repositoryProblems ?? {} } : {},
+    ...deployment.patterns ? { patterns: deployment.patterns } : {} }
+    this.view = undefined
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
-    if (this.resolved) await writeEnvironment(this.resolved, blocked)
+    if (this.resolved) await writeEnvironment(this.deployment, blocked)
   }
   restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */

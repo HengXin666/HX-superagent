@@ -69,5 +69,10 @@ export interface SourceContext {
   notify(message: OutboundMessage): void
   /** Reports the state of one of this kind's declared health entries; throws for undeclared entry names. */
   report(entry: string, health: Health): void
+  /**
+   * Sets the repositories GitHub pattern row `row` covers now, by the IDs of their instances, which the running deployment then
+   * lists among its repositories. Only the GitHub Source calls it.
+   */
+  adopt?(row: string, members: Record<string, string>): void
 }
 export const sourceContext = (host: SourceHost, kind: { kind: string; health: readonly string[] }): SourceContext => host.context(kind)

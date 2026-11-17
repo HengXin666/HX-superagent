@@ -24,6 +24,8 @@ export interface SourceContextDeps {
   readonly feishuProblem?: SetupProblem | undefined
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
+  /** Sets the repositories a GitHub pattern row covers now in the running deployment (`Setup.adopt`). */
+  adopt?(row: string, members: Record<string, string>): void
 }
 
 /**
@@ -44,6 +46,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       return instance?.enabled ? instance.config : undefined
     },
     receive: trigger => deps.receive(trigger),
+    adopt: (row, members) => { deps.adopt?.(row, members) },
     atomic: work => store.atomic(work),
     state: {
       get: name => store.get(name),

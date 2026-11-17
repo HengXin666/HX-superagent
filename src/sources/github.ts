@@ -15,7 +15,9 @@ import { instanceId, observePull, pullsOf, readPull, type Pull } from './github-
 import { health, sourceContext, type Health, type SourceContext, type SourceHost } from './host.ts'
 import type { SourceRegistry } from './registry.ts'
 import type { HealthEntry } from '../infra/health.ts'
-import { githubInstances, repositoryOf } from '../deployment.ts'
+import { githubInstances, patternMembers, repositoryOf } from '../deployment.ts'
+import { patternRowOf } from '../infra/repository-pattern.ts'
+import { healthName, LISTING_INTERVAL_MS, own, RepositoryPatterns, SUBSCRIPTION } from './github-patterns.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, pollThreads as pollEach } from './poll.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -60,6 +62,8 @@ const SHARED = ['cli', 'pollSeconds', 'failuresBeforeError'] as const
 const CI_REPOSITORIES_PER_MINUTE = 15
 /** How many repositories the agent account starts or stops watching in one round, within GitHub's limit on bursts of writes. */
 const WATCH_CHANGES_PER_ROUND = 20
+/** The pattern rows' listing interval in minutes, as the settings name it. */
+const MINUTES = LISTING_INTERVAL_MS / 60_000
 export const githubKind: SourceKind<GithubConfig> = {
   kind: SOURCE,
   multiple: { shared: SHARED, label: config => config.repository },
@@ -67,8 +71,8 @@ export const githubKind: SourceKind<GithubConfig> = {
   description: { zh: '智能体的 GitHub 账号；接收仓库里发给它的通知、已订阅 Issue 与 PR 的讨论、CI 状态变化和 PR 合并关闭。', en: 'The agent\'s GitHub accounts; receives notifications to it in the repository, discussion on subscribed Issues and PRs, CI changes, and PR merge or close.' },
   schema: GithubConfigSchema,
   fields: [
-    { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
-      hint: { zh: '写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。更多仓库在下面的仓库表里加，每个仓库是一个实例，有自己的允许名单、接收表和工单。', en: 'Written owner/name. This Source receives the repository\'s notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent. Add more repositories in the repository table below: each is an instance with its own allowed accounts, admission table and tickets.' } },
+    { key: 'repository', type: 'text', pattern: '[A-Za-z0-9_.\\-]+/[A-Za-z0-9_.*\\-]+', label: { zh: '监听的仓库', en: 'Repository' },
+      hint: { zh: `写作 owner/name。这个来源接收这个仓库的通知和讨论；保存时检查智能体账号能否推送到它，然后重启 dsh-superagent。更多仓库在下面的仓库表里加，每个仓库是一个实例，有自己的允许名单、接收表和工单。仓库表里的 owner/** 这样的通配行保持一行，实时匹配：新仓库在下一次 @ 智能体时或 ${MINUTES} 分钟内自动纳入。`, en: `Written owner/name. This Source receives the repository's notifications and discussion; saving checks that the agent account can push to it, then restarts dsh-superagent. Add more repositories in the repository table below: each is an instance with its own allowed accounts, admission table and tickets. A pattern row there such as owner/** stays one row and matches live: a new repository joins on its next mention of the agent or within ${MINUTES} minutes.` } },
     { key: 'cli', type: 'text', label: { zh: '智能体的 GitHub CLI', en: 'Agent GitHub CLI' },
       hint: { zh: '命令名或绝对路径，通常是用 GH_CONFIG_DIR 登录智能体账号的 gh 包装脚本。智能体以它登录的账号行事，执行器以 gh 调用它。保存时检查它登录的账号能否推送到仓库，然后重启 dsh-superagent。', en: 'A command name or absolute path, usually a gh wrapper signed in to the agent account through GH_CONFIG_DIR. The agent acts as the account it is signed in to, and the Executor calls it as gh. Saving checks that this account can push to the repository, then restarts dsh-superagent.' } },
     { key: 'gatewayInstance', type: 'number', advanced: true, min: 0, max: 1000000, label: { zh: '网关 github_user 实例', en: 'Gateway github_user instance' },
@@ -120,7 +124,7 @@ export const githubKind: SourceKind<GithubConfig> = {
   environment: {
     variables: [
       { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORY', description: { zh: '这个来源监听的仓库，owner/name。智能体在这里开的 PR，分支最后一段是 DSH_SUPERAGENT_NAME 时（例如 agent/$DSH_SUPERAGENT_NAME）会关联到工单', en: 'The repository this Source watches, as owner/name. A PR the agent opens here from a branch whose last path segment is DSH_SUPERAGENT_NAME (for example agent/$DSH_SUPERAGENT_NAME) binds to the ticket' } },
-      { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORIES', description: { zh: '这个安装监听的全部仓库，空格分隔，第一个是默认仓库。在其中别的仓库开的 PR，分支同样以 DSH_SUPERAGENT_NAME 结尾时也会关联到工单', en: 'Every repository this installation watches, space-separated, the default one first. A PR opened in another of them from a branch that also ends in DSH_SUPERAGENT_NAME binds to the ticket too' } },
+      { key: 'DSH_SUPERAGENT_GITHUB_REPOSITORIES', description: { zh: '这个安装监听的全部仓库，空格分隔，第一个是默认仓库；通配行列出它现在匹配到的仓库。在其中别的仓库开的 PR，分支同样以 DSH_SUPERAGENT_NAME 结尾时也会关联到工单', en: 'Every repository this installation watches, space-separated, the default one first, with the repositories pattern rows cover now. A PR opened in another of them from a branch that also ends in DSH_SUPERAGENT_NAME binds to the ticket too' } },
       { key: 'DSH_SUPERAGENT_GITHUB_ACCOUNT', description: { zh: '智能体的 GitHub 账号；gh 以它登录，除自动合并外的 GitHub 操作都用 gh，不用其他账号或凭据', en: 'The agent\'s GitHub account. gh is signed in to it; use gh for every GitHub operation except auto-merge, and never another account or credential' } },
       { key: 'DSH_SUPERAGENT_GITHUB_COMMIT_EMAIL', description: { zh: '智能体账号的提交邮箱。这里的 git 没有身份：按提示词写明的作者提交，没有写明时用智能体账号和这个邮箱', en: 'Commit email of the agent\'s account. git has no identity here: commit as the author these instructions name, or as the agent\'s account with this email when they name none' } },
       { key: 'DSH_SUPERAGENT_GITHUB_NUMBER', description: { zh: '接下工单的 Issue 或 PR 编号；工单不是从 GitHub 来的时为空', en: 'Number of the Issue or PR that started the ticket; empty when the ticket did not start on GitHub' } },
@@ -139,14 +143,18 @@ export const githubKind: SourceKind<GithubConfig> = {
   facts: (deployment, id = SOURCE): Record<string, Localized | string> => {
     if (!deployment) return {}
     if (id === SOURCE) return { cli: { zh: `当前账号 @${deployment.github.login}`, en: `Current account @${deployment.github.login}` } }
+    const pattern = deployment.patterns?.[id]
+    if (pattern !== undefined) {
+      const covered = Object.entries(patternMembers(deployment)).filter(([member]) => patternRowOf(member) === id).length
+      return { repository: { zh: `${pattern} 现在匹配 @${deployment.github.login} 能推送的 ${covered} 个仓库；新仓库在下一次 @ 时或 ${MINUTES} 分钟内纳入`,
+        en: `${pattern} covers ${covered} repositories @${deployment.github.login} can push to now; a new one joins on its next mention or within ${MINUTES} minutes` } }
+    }
     const repository = repositoryOf(deployment, id)
     return repository ? { repository: { zh: `@${deployment.github.login} 可以推送到 ${repository}`, en: `@${deployment.github.login} can push to ${repository}` } } : {}
   },
 }
 /** The resource prefix of GitHub instance reads: `github/…` for the default instance, `<id>/…` (such as `github-2/…`) for another. */
 export const resourcePrefix = (ctx: Pick<SourceContext, 'instance'>): string => instanceId(ctx)
-/** Rewrites a state key of extra instance `id` into its own namespace; the default instance keeps the historical keys. */
-const own = (id: string, name: string): string => id === SOURCE ? name : `${id}/${name}`
 /**
  * The context of GitHub instance `id` on `repository`, made from the default instance's: its Triggers, Threads and state are its own,
  * its GitHub calls go to its repository, and its health reports to `health` (its `github@<id>` entry).
@@ -168,13 +176,17 @@ export function instanceContext(base: SourceContext, id: string, repository: str
     },
     report: (entry, value) => {
       if (entry !== 'github') throw new Error(`The GitHub Source has no health entry ${entry}`)
-      health.get(`github@${id}`)?.set(value)
+      health.get(healthName(id))?.set(value)
     },
   }
 }
-/** The contexts of every GitHub instance setup verified, the default one first. */
-export function instanceContexts(host: SourceHost, base: SourceContext): SourceContext[] {
-  return githubInstances(base.deployment).map(([id, repository]) => instanceContext(base, id, repository, host.sources.instanceHealth(id)))
+/**
+ * The contexts of every GitHub instance setup verified, the default one first, and of every repository a pattern row covers now,
+ * whose health `patterns` gathers under its row.
+ */
+export function instanceContexts(host: SourceHost, base: SourceContext, patterns?: RepositoryPatterns): SourceContext[] {
+  return githubInstances(base.deployment).map(([id, repository]) => instanceContext(base, id, repository,
+    patterns && patternRowOf(id) !== undefined ? new Map([[healthName(id), patterns.recorder(id)]]) : host.sources.instanceHealth(id)))
 }
 export const name = 'dsh-superagent-github'
 export const inject = ['orchestrator']
@@ -204,8 +216,9 @@ export function apply(ctx: Context): void {
   ctx.effect(() => {
     const source = sourceContext(ctx.orchestrator, kind)
     const controller = new AbortController()
+    const patterns = new RepositoryPatterns(source, row => sources().instanceHealth(row).get(healthName(row)))
     // Unhandled rejections terminate the DSH process, so a failure escaping the polling loop is reported as source health instead.
-    const running = watch(source, controller.signal, () => instanceContexts(ctx.orchestrator, source))
+    const running = watch(source, controller.signal, () => instanceContexts(ctx.orchestrator, source, patterns), patterns)
       .catch((error: unknown) => { source.report('github', { state: 'error', detail: String(error) }) })
     return async () => { controller.abort(); await running }
   })
@@ -217,15 +230,23 @@ export function pollFailure(failures: number, threshold: number, error: unknown)
 /**
  * Polls every GitHub instance in turn each round; an instance whose round fails reports its own error and the others go on. The
  * account's interval (`pollSeconds` of the default instance) grows with the number of repositories so their reads stay within
- * GitHub's hourly limit for the account.
+ * GitHub's hourly limit for the account. With `patterns`, each round first finds the repositories the pattern rows cover now: from
+ * the listing when it is due, then from the inbox, before the instances poll.
  */
-async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => SourceContext[] = () => [ctx]): Promise<void> {
+export async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => SourceContext[] = () => [ctx],
+  patterns?: RepositoryPatterns): Promise<void> {
   const failures = new Map<string, number>()
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the accounts; until then nothing is polled.
   if (!ctx.configured()) { ctx.report('github', health('paused', 'setupPending')); return }
+  patterns?.restore()
   while (!signal.aborted) {
-    const instances = contexts()
+    if (patterns) {
+      patterns.prune()
+      // A failed listing waits for the next interval, shown on the pattern rows; mentions still bring repositories in.
+      await patterns.list(ctx.commands.withSignal(signal)).catch(() => false)
+    }
+    let instances = contexts()
     const configured = instances.filter(instance => instance.config<GithubConfig>(SOURCE))
     // One read of the account's inbox serves every repository, from the earliest cursor among them; each takes its own notifications.
     const now = new Date().toISOString()
@@ -233,6 +254,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => So
     const inbox = earliest === undefined ? undefined : readInbox(ctx.commands.withSignal(signal), earliest)
     // Each instance's round reports a failed read as its own failure.
     inbox?.catch(() => { /* awaited by every round */ })
+    // A notification from a repository no instance has yet joins it to the pattern row that matches it, in this same round.
+    if (patterns && inbox && patterns.take(await inbox.catch(() => ({ since: now, notifications: [], interval: 60 })))) instances = contexts()
     const budget: WatchBudget = { left: WATCH_CHANGES_PER_ROUND }
     let interval = 60
     for (const instance of instances) {
@@ -250,7 +273,8 @@ async function watch(ctx: SourceContext, signal: AbortSignal, contexts: () => So
         if (!signal.aborted && failed) instance.report('github', failed)
       }
     }
-    const ci = configured.filter(instance => instance.config<GithubConfig>(SOURCE)?.observeCi).length
+    patterns?.report()
+    const ci = instances.filter(instance => instance.config<GithubConfig>(SOURCE)?.observeCi).length
     const spread = 60 * Math.ceil(ci / CI_REPOSITORIES_PER_MINUTE)
     await pause(Math.max(interval, spread, ctx.config<GithubConfig>(SOURCE)?.pollSeconds ?? 60) * 1000, signal)
   }
@@ -295,8 +319,6 @@ async function pollRepository(ctx: SourceContext, round: Round, budget: WatchBud
   try { await pollBranchCi(ctx, round) }
   catch (error) { if (!stopped(ctx, round)) round.failures.push(`default branch CI: ${String(error)}`) }
 }
-/** The repository's watch of the agent account, read and changed at `repos/{owner}/{repo}/subscription`. */
-const SUBSCRIPTION = 'subscription'
 const SubscriptionSchema = z.looseObject({ subscribed: z.boolean(), ignored: z.boolean() })
 /**
  * Starts watching the repository when one of its observation switches turns on, keeping a watch the account already had, and stops

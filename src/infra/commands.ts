@@ -7,6 +7,8 @@ import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
+/** The repositories the agent account owns or collaborates on, itself or through an organization, 100 a page. */
+export const ACCOUNT_REPOSITORIES = 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member'
 /**
  * Error thrown by Commands when a CLI invocation fails, capturing stderr diagnostics, API error codes, and exit status without echoing command arguments.
  * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
@@ -101,7 +103,7 @@ export class Commands {
     return validItems(item, pages.flat(), tally)
   }
   /**
-   * Reads the agent account's notification inbox (`notifications?<query>`): the one GitHub read outside the configured repository,
+   * Reads the agent account's notification inbox (`notifications?<query>`), one of the two GitHub reads outside the configured repository,
    * made once per polling round for every repository the installation receives, whatever their number.
    */
   async inbox(query: string, ...flags: string[]): Promise<string> {
@@ -110,6 +112,11 @@ export class Commands {
   /** Every page of the agent account's notification inbox, skipping items that fail schema validation. */
   async inboxPages<T>(item: z.ZodType<T>, query: string, tally?: Tally): Promise<T[]> {
     const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', `notifications?${query}`, '--paginate', '--slurp']))
+    return validItems(item, pages.flat(), tally)
+  }
+  /** Every repository of the agent account (`ACCOUNT_REPOSITORIES`), skipping items that fail schema validation. */
+  async accountRepositories<T>(item: z.ZodType<T>, tally?: Tally): Promise<T[]> {
+    const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', ACCOUNT_REPOSITORIES, '--paginate', '--slurp']))
     return validItems(item, pages.flat(), tally)
   }
   private path(path: string): string {
